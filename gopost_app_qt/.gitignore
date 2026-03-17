@@ -1,0 +1,12 @@
+# Build output
+build/
+cmake-build-*/
+
+# IDE
+.idea/
+*.user
+*.autosave
+
+# OS
+.DS_Store
+Thumbs.db

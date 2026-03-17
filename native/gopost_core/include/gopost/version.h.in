@@ -1,0 +1,9 @@
+#ifndef GOPOST_VERSION_H
+#define GOPOST_VERSION_H
+
+#define GOPOST_VERSION_MAJOR @gopost_native_VERSION_MAJOR@
+#define GOPOST_VERSION_MINOR @gopost_native_VERSION_MINOR@
+#define GOPOST_VERSION_PATCH @gopost_native_VERSION_PATCH@
+#define GOPOST_VERSION_STRING "@gopost_native_VERSION@"
+
+#endif

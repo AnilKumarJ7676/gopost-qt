@@ -1,0 +1,1880 @@
+openapi: 3.0.3
+info:
+  title: Gopost API
+  description: |
+    Backend API for the Gopost cross-platform media editing application.
+    Provides authentication, template management, media handling, subscriptions,
+    and admin operations.
+  version: 1.0.0
+  contact:
+    name: Gopost Engineering
+    email: engineering@gopost.app
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local development
+  - url: https://api-staging.gopost.app/api/v1
+    description: Staging
+  - url: https://api.gopost.app/api/v1
+    description: Production
+
+tags:
+  - name: Auth
+    description: Authentication and session management
+  - name: Users
+    description: User profile and account management
+  - name: Templates
+    description: Template browsing, access, and publishing
+  - name: Media
+    description: User media upload and management
+  - name: Subscriptions
+    description: Subscription plans, purchases, and management
+  - name: Categories
+    description: Template categories and tags
+  - name: Admin
+    description: Admin dashboard, template moderation, user management, analytics
+
+security:
+  - BearerAuth: []
+
+paths:
+  # ─── Auth ──────────────────────────────────────────────────────────────
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Account created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          description: Email already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Authenticate and receive tokens
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh an expired access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          description: Invalid or expired refresh token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Invalidate current session
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+
+  /auth/oauth/{provider}:
+    post:
+      tags: [Auth]
+      summary: OAuth2 authentication
+      security: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [google, apple, facebook]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OAuthRequest'
+      responses:
+        '200':
+          description: Authenticated via OAuth
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Invalid OAuth token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─── Users ─────────────────────────────────────────────────────────────
+  /users/me:
+    get:
+      tags: [Users]
+      summary: Get current user profile
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+    put:
+      tags: [Users]
+      summary: Update current user profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRequest'
+      responses:
+        '200':
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+    delete:
+      tags: [Users]
+      summary: Delete account (GDPR right to erasure)
+      responses:
+        '200':
+          description: Account deletion initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+
+  /users/me/password:
+    put:
+      tags: [Users]
+      summary: Change password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '200':
+          description: Password changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          description: Current password incorrect
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /users/me/data-export:
+    get:
+      tags: [Users]
+      summary: Export all user data (GDPR right to access)
+      responses:
+        '200':
+          description: User data export
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        description: Complete user data export
+
+  /users/me/subscriptions:
+    get:
+      tags: [Users]
+      summary: Get current subscription status
+      responses:
+        '200':
+          description: Subscription info
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Subscription'
+
+  /users/me/entitlements:
+    get:
+      tags: [Users]
+      summary: Get current entitlements (feature flags)
+      responses:
+        '200':
+          description: Entitlement map
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Entitlements'
+
+  # ─── Templates ─────────────────────────────────────────────────────────
+  /templates:
+    get:
+      tags: [Templates]
+      summary: Browse templates with filtering and pagination
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TemplateType'
+        - $ref: '#/components/parameters/CategoryId'
+        - $ref: '#/components/parameters/Tags'
+        - $ref: '#/components/parameters/SearchQuery'
+        - $ref: '#/components/parameters/SortOrder'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Paginated template list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/TemplateSummary'
+                      meta:
+                        $ref: '#/components/schemas/CursorMeta'
+          headers:
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/RateLimitLimit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/RateLimitRemaining'
+            X-RateLimit-Reset:
+              $ref: '#/components/headers/RateLimitReset'
+    post:
+      tags: [Templates]
+      summary: Publish a new template (Creator/Admin only)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CreateTemplateRequest'
+      responses:
+        '201':
+          description: Template submitted for review
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                            format: uuid
+                          status:
+                            type: string
+                            example: pending_review
+                          message:
+                            type: string
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: Insufficient role (requires creator or admin)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /templates/{id}:
+    get:
+      tags: [Templates]
+      summary: Get template details
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/TemplateId'
+      responses:
+        '200':
+          description: Template details
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/TemplateDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /templates/{id}/access:
+    post:
+      tags: [Templates]
+      summary: Request access to download and render a template
+      parameters:
+        - $ref: '#/components/parameters/TemplateId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TemplateAccessRequest'
+      responses:
+        '200':
+          description: Access granted with signed URL and session key
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/TemplateAccessResponse'
+        '401':
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Subscription required for premium template
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  # ─── Media ─────────────────────────────────────────────────────────────
+  /media/upload:
+    post:
+      tags: [Media]
+      summary: Upload user media for editor usage
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+              required: [file]
+      responses:
+        '201':
+          description: Media uploaded
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UserMedia'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '413':
+          description: File too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /media/{id}:
+    get:
+      tags: [Media]
+      summary: Get media metadata
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Media metadata
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/UserMedia'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Media]
+      summary: Delete user media
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Media deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ─── Subscriptions ─────────────────────────────────────────────────────
+  /subscriptions/plans:
+    get:
+      tags: [Subscriptions]
+      summary: List available subscription plans
+      security: []
+      responses:
+        '200':
+          description: Plan list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/SubscriptionPlan'
+
+  /subscriptions/checkout:
+    post:
+      tags: [Subscriptions]
+      summary: Create Stripe checkout session (web/desktop)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckoutRequest'
+      responses:
+        '200':
+          description: Checkout session created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          checkout_url:
+                            type: string
+                            format: uri
+                          session_id:
+                            type: string
+
+  /subscriptions/verify:
+    post:
+      tags: [Subscriptions]
+      summary: Verify App Store / Play Store purchase receipt
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyReceiptRequest'
+      responses:
+        '200':
+          description: Receipt verified, subscription active
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          subscription:
+                            $ref: '#/components/schemas/Subscription'
+                          entitlements:
+                            $ref: '#/components/schemas/Entitlements'
+        '400':
+          description: Invalid receipt or product mismatch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Receipt already used by another account
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /subscriptions/webhook:
+    post:
+      tags: [Subscriptions]
+      summary: Stripe webhook endpoint
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Webhook processed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  received:
+                    type: boolean
+        '400':
+          description: Invalid webhook signature
+
+  /subscriptions/cancel:
+    delete:
+      tags: [Subscriptions]
+      summary: Cancel subscription at period end
+      responses:
+        '200':
+          description: Cancellation confirmed
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            example: cancelled
+                          access_until:
+                            type: string
+                            format: date-time
+                          message:
+                            type: string
+
+  /subscriptions/promo/validate:
+    post:
+      tags: [Subscriptions]
+      summary: Validate a promotional code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+                  example: GOPOST24
+      responses:
+        '200':
+          description: Promo code valid
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PromoCode'
+        '404':
+          description: Code not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─── Categories & Tags ─────────────────────────────────────────────────
+  /categories:
+    get:
+      tags: [Categories]
+      summary: List all template categories
+      security: []
+      responses:
+        '200':
+          description: Category list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Category'
+
+  /categories/{id}/templates:
+    get:
+      tags: [Categories]
+      summary: Get templates in a category
+      security: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Templates in category
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/TemplateSummary'
+                      meta:
+                        $ref: '#/components/schemas/CursorMeta'
+
+  /tags/popular:
+    get:
+      tags: [Categories]
+      summary: Get popular tags
+      security: []
+      responses:
+        '200':
+          description: Popular tag list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Tag'
+
+  /tags/search:
+    get:
+      tags: [Categories]
+      summary: Search tags
+      security: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Matching tags
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Tag'
+
+  # ─── Admin ─────────────────────────────────────────────────────────────
+  /admin/dashboard:
+    get:
+      tags: [Admin]
+      summary: Get dashboard statistics
+      responses:
+        '200':
+          description: Dashboard KPIs
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/DashboardStats'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/templates:
+    get:
+      tags: [Admin]
+      summary: List all templates (including pending)
+      parameters:
+        - $ref: '#/components/parameters/TemplateType'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, pending_review, approved, rejected, published, unpublished, archived]
+        - $ref: '#/components/parameters/CategoryId'
+        - $ref: '#/components/parameters/SearchQuery'
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Admin template list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/TemplateDetail'
+                      meta:
+                        $ref: '#/components/schemas/PageMeta'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/templates/{id}/publish:
+    put:
+      tags: [Admin]
+      summary: Publish a pending template
+      parameters:
+        - $ref: '#/components/parameters/TemplateId'
+      responses:
+        '200':
+          description: Template published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /admin/templates/{id}/reject:
+    put:
+      tags: [Admin]
+      summary: Reject a pending template
+      parameters:
+        - $ref: '#/components/parameters/TemplateId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 10
+                  maxLength: 500
+      responses:
+        '200':
+          description: Template rejected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /admin/templates/{id}:
+    delete:
+      tags: [Admin]
+      summary: Delete a template
+      parameters:
+        - $ref: '#/components/parameters/TemplateId'
+      responses:
+        '200':
+          description: Template deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /admin/templates/bulk:
+    put:
+      tags: [Admin]
+      summary: Bulk template operations
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkTemplateRequest'
+      responses:
+        '200':
+          description: Bulk operation result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/BulkResult'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/templates/upload:
+    post:
+      tags: [Admin]
+      summary: Upload external template (After Effects / Lightroom export)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                package:
+                  type: string
+                  format: binary
+                  description: .zip template package
+                metadata:
+                  type: string
+                  description: JSON metadata (name, type, category, tags)
+              required: [package, metadata]
+      responses:
+        '202':
+          description: Upload accepted, processing started
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          upload_id:
+                            type: string
+                            format: uuid
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/users:
+    get:
+      tags: [Admin]
+      summary: List users with filters
+      parameters:
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [user, creator, admin, super_admin]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, banned]
+        - $ref: '#/components/parameters/SearchQuery'
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: User list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/User'
+                      meta:
+                        $ref: '#/components/schemas/PageMeta'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/users/{id}/role:
+    put:
+      tags: [Admin]
+      summary: Change user role
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  type: string
+                  enum: [user, creator, admin]
+      responses:
+        '200':
+          description: Role updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/users/{id}/ban:
+    put:
+      tags: [Admin]
+      summary: Ban or unban a user
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [banned]
+              properties:
+                banned:
+                  type: boolean
+                reason:
+                  type: string
+                  maxLength: 500
+      responses:
+        '200':
+          description: Ban status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/audit-logs:
+    get:
+      tags: [Admin]
+      summary: View audit trail
+      parameters:
+        - name: actor
+          in: query
+          schema:
+            type: string
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: resource_type
+          in: query
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessWrapper'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AuditLogEntry'
+                      meta:
+                        $ref: '#/components/schemas/PageMeta'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Components
+# ═══════════════════════════════════════════════════════════════════════════
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  # ─── Parameters ──────────────────────────────────────────────────────
+  parameters:
+    TemplateId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    TemplateType:
+      name: type
+      in: query
+      schema:
+        type: string
+        enum: [video, image]
+    CategoryId:
+      name: category_id
+      in: query
+      schema:
+        type: string
+        format: uuid
+    Tags:
+      name: tags
+      in: query
+      description: Comma-separated tag names
+      schema:
+        type: string
+    SearchQuery:
+      name: q
+      in: query
+      schema:
+        type: string
+    SortOrder:
+      name: sort
+      in: query
+      schema:
+        type: string
+        enum: [popular, newest, trending]
+        default: popular
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor for pagination
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 50
+        default: 20
+
+  # ─── Headers ─────────────────────────────────────────────────────────
+  headers:
+    RateLimitLimit:
+      description: Maximum requests allowed in window
+      schema:
+        type: integer
+    RateLimitRemaining:
+      description: Requests remaining in current window
+      schema:
+        type: integer
+    RateLimitReset:
+      description: Unix timestamp when the window resets
+      schema:
+        type: integer
+
+  # ─── Responses ───────────────────────────────────────────────────────
+  responses:
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    RateLimited:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+      headers:
+        X-RateLimit-Limit:
+          $ref: '#/components/headers/RateLimitLimit'
+        X-RateLimit-Remaining:
+          $ref: '#/components/headers/RateLimitRemaining'
+        X-RateLimit-Reset:
+          $ref: '#/components/headers/RateLimitReset'
+
+  # ─── Schemas ─────────────────────────────────────────────────────────
+  schemas:
+    SuccessWrapper:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+
+    ErrorResponse:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+              example: One or more fields are invalid
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
+
+    MessageResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            message:
+              type: string
+
+    # ─── Auth ────────────────────────────────────────────────────────
+    RegisterRequest:
+      type: object
+      required: [email, password, name]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        device_fingerprint:
+          type: string
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+        device_fingerprint:
+          type: string
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+
+    OAuthRequest:
+      type: object
+      required: [id_token]
+      properties:
+        id_token:
+          type: string
+        device_fingerprint:
+          type: string
+
+    AuthResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            user:
+              $ref: '#/components/schemas/User'
+            access_token:
+              type: string
+            refresh_token:
+              type: string
+            expires_in:
+              type: integer
+              description: Access token TTL in seconds
+              example: 900
+
+    TokenResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            access_token:
+              type: string
+            refresh_token:
+              type: string
+            expires_in:
+              type: integer
+              example: 900
+
+    # ─── User ────────────────────────────────────────────────────────
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        avatar_url:
+          type: string
+          format: uri
+          nullable: true
+        role:
+          type: string
+          enum: [user, creator, admin, super_admin]
+        created_at:
+          type: string
+          format: date-time
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        avatar_url:
+          type: string
+          format: uri
+
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password:
+          type: string
+        new_password:
+          type: string
+          minLength: 8
+
+    # ─── Template ────────────────────────────────────────────────────
+    TemplateSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        type:
+          type: string
+          enum: [video, image]
+        thumbnail_url:
+          type: string
+          format: uri
+        preview_url:
+          type: string
+          format: uri
+        category:
+          $ref: '#/components/schemas/Category'
+        tags:
+          type: array
+          items:
+            type: string
+        usage_count:
+          type: integer
+        is_premium:
+          type: boolean
+        duration_ms:
+          type: integer
+          nullable: true
+        dimensions:
+          $ref: '#/components/schemas/Dimensions'
+        created_at:
+          type: string
+          format: date-time
+
+    TemplateDetail:
+      allOf:
+        - $ref: '#/components/schemas/TemplateSummary'
+        - type: object
+          properties:
+            description:
+              type: string
+            layer_count:
+              type: integer
+            editable_fields:
+              type: array
+              items:
+                $ref: '#/components/schemas/EditableField'
+            creator:
+              type: object
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                name:
+                  type: string
+            version:
+              type: integer
+            status:
+              type: string
+              enum: [draft, pending_review, approved, rejected, published, unpublished, archived]
+            updated_at:
+              type: string
+              format: date-time
+
+    EditableField:
+      type: object
+      properties:
+        field_id:
+          type: string
+        type:
+          type: string
+          enum: [text, image, color, video, audio]
+        label:
+          type: string
+        default:
+          type: string
+          nullable: true
+
+    Dimensions:
+      type: object
+      properties:
+        width:
+          type: integer
+        height:
+          type: integer
+
+    TemplateAccessRequest:
+      type: object
+      required: [device_fingerprint, device_public_key]
+      properties:
+        device_fingerprint:
+          type: string
+        device_public_key:
+          type: string
+          description: Base64-encoded RSA public key for session key encryption
+
+    TemplateAccessResponse:
+      type: object
+      properties:
+        download_url:
+          type: string
+          format: uri
+        download_url_expires_at:
+          type: string
+          format: date-time
+        session_key_encrypted:
+          type: string
+          description: Base64 RSA-encrypted AES session key
+        render_token:
+          type: string
+          description: Short-lived JWT authorizing decryption
+        render_token_expires_at:
+          type: string
+          format: date-time
+
+    CreateTemplateRequest:
+      type: object
+      properties:
+        metadata:
+          type: string
+          description: JSON string with name, description, category_id, tags, type
+        template_package:
+          type: string
+          format: binary
+        thumbnail:
+          type: string
+          format: binary
+        preview:
+          type: string
+          format: binary
+
+    # ─── Subscription ────────────────────────────────────────────────
+    SubscriptionPlan:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        tier:
+          type: string
+          enum: [pro, creator]
+        billing_cycle:
+          type: string
+          enum: [monthly, yearly]
+        price_cents:
+          type: integer
+        currency:
+          type: string
+        trial_days:
+          type: integer
+        features:
+          type: object
+        apple_product_id:
+          type: string
+          nullable: true
+        google_product_id:
+          type: string
+          nullable: true
+        stripe_price_id:
+          type: string
+          nullable: true
+
+    Subscription:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        plan_id:
+          type: string
+        status:
+          type: string
+          enum: [none, trialing, active, past_due, cancelled, expired]
+        provider:
+          type: string
+          enum: [apple, google, stripe]
+        current_period_start:
+          type: string
+          format: date-time
+        current_period_end:
+          type: string
+          format: date-time
+        is_trial:
+          type: boolean
+        trial_end:
+          type: string
+          format: date-time
+          nullable: true
+        cancelled_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    Entitlements:
+      type: object
+      properties:
+        plan_id:
+          type: string
+        is_trial:
+          type: boolean
+        premium_templates:
+          type: boolean
+        max_video_tracks:
+          type: integer
+        max_video_effects:
+          type: integer
+          description: "-1 means unlimited"
+        max_image_layers:
+          type: integer
+        max_image_filters:
+          type: integer
+          description: "-1 means unlimited"
+        max_export_res:
+          type: integer
+          description: Max export resolution in pixels (e.g., 2160 for 4K)
+        export_watermark:
+          type: boolean
+        export_formats:
+          type: array
+          items:
+            type: string
+        cloud_storage_mb:
+          type: integer
+        can_publish:
+          type: boolean
+        priority_export:
+          type: boolean
+        creator_analytics:
+          type: boolean
+        valid_until:
+          type: string
+          format: date-time
+          nullable: true
+
+    CheckoutRequest:
+      type: object
+      required: [plan_id]
+      properties:
+        plan_id:
+          type: string
+        promo_code:
+          type: string
+          nullable: true
+        success_url:
+          type: string
+          format: uri
+        cancel_url:
+          type: string
+          format: uri
+
+    VerifyReceiptRequest:
+      type: object
+      required: [platform, receipt, product_id]
+      properties:
+        platform:
+          type: string
+          enum: [ios, android]
+        receipt:
+          type: string
+          description: JWS (iOS) or purchase token (Android)
+        product_id:
+          type: string
+
+    PromoCode:
+      type: object
+      properties:
+        code:
+          type: string
+        discount_type:
+          type: string
+          enum: [percentage, fixed_amount, free_months]
+        discount_value:
+          type: integer
+        applicable_plans:
+          type: array
+          items:
+            type: string
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ─── Media ───────────────────────────────────────────────────────
+    UserMedia:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        media_type:
+          type: string
+          enum: [image, video, audio]
+        filename:
+          type: string
+        file_size:
+          type: integer
+          format: int64
+        width:
+          type: integer
+          nullable: true
+        height:
+          type: integer
+          nullable: true
+        duration_ms:
+          type: integer
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    # ─── Category / Tag ──────────────────────────────────────────────
+    Category:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        description:
+          type: string
+          nullable: true
+        icon_url:
+          type: string
+          format: uri
+          nullable: true
+        sort_order:
+          type: integer
+
+    Tag:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+
+    # ─── Admin ───────────────────────────────────────────────────────
+    DashboardStats:
+      type: object
+      properties:
+        total_users:
+          type: integer
+        user_growth_percent:
+          type: number
+          format: double
+        total_templates:
+          type: integer
+        template_growth_percent:
+          type: number
+          format: double
+        pending_review:
+          type: integer
+        pending_review_delta:
+          type: integer
+        mrr_cents:
+          type: integer
+        mrr_growth_percent:
+          type: number
+          format: double
+
+    BulkTemplateRequest:
+      type: object
+      required: [ids, action]
+      properties:
+        ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          minItems: 1
+          maxItems: 100
+        action:
+          type: string
+          enum: [publish, unpublish, delete]
+
+    BulkResult:
+      type: object
+      properties:
+        processed:
+          type: integer
+        failed:
+          type: integer
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              status:
+                type: string
+              error:
+                type: string
+                nullable: true
+
+    AuditLogEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        action:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+          format: uuid
+        metadata:
+          type: object
+        ip_address:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    # ─── Pagination ──────────────────────────────────────────────────
+    CursorMeta:
+      type: object
+      properties:
+        next_cursor:
+          type: string
+          nullable: true
+        has_more:
+          type: boolean
+        total:
+          type: integer
+
+    PageMeta:
+      type: object
+      properties:
+        page:
+          type: integer
+        per_page:
+          type: integer
+        total:
+          type: integer
+          format: int64
+        total_pages:
+          type: integer

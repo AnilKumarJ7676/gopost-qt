@@ -1,0 +1,32 @@
+#ifndef GOPOST_ERROR_H
+#define GOPOST_ERROR_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum {
+    GOPOST_OK = 0,
+    GOPOST_ERROR_INVALID_ARGUMENT = -1,
+    GOPOST_ERROR_OUT_OF_MEMORY = -2,
+    GOPOST_ERROR_NOT_INITIALIZED = -3,
+    GOPOST_ERROR_ALREADY_INITIALIZED = -4,
+    GOPOST_ERROR_GPU_NOT_AVAILABLE = -5,
+    GOPOST_ERROR_CODEC_NOT_FOUND = -6,
+    GOPOST_ERROR_IO = -7,
+    GOPOST_ERROR_CRYPTO = -8,
+    GOPOST_ERROR_DECODER = -9,
+    GOPOST_ERROR_UNSUPPORTED_FORMAT = -10,
+    GOPOST_ERROR_SHADER_COMPILE = -11,
+    GOPOST_ERROR_FRAMEBUFFER_INCOMPLETE = -12,
+    GOPOST_ERROR_RESOURCE_NOT_FOUND = -13,
+    GOPOST_ERROR_UNKNOWN = -99,
+} GopostError;
+
+const char* gopost_error_string(GopostError error);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

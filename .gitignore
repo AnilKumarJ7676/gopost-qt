@@ -1,0 +1,50 @@
+# Qt / C++ Build
+gopost_app_qt/build/
+native/build/
+native/cmake-build-*/
+native/*/build/
+native/*/cmake-build-*/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Go
+gopost-backend/bin/
+gopost-backend/tmp/
+gopost-backend/vendor/
+
+# C/C++ Engine third-party
+native/gopost_engine/third_party/ffmpeg/
+native/gopost_engine/third_party/openssl/
+native/gopost_engine/third_party/freetype/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+CMakeUserPresets.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Docker
+docker-compose.override.yml
+
+# Coverage
+coverage/
+*.lcov
+
+# Misc
+aqtinstall.log
+.claude/
