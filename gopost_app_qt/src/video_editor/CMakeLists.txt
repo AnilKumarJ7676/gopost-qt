@@ -39,6 +39,7 @@ set(VIDEO_EDITOR_SOURCES
     presentation/notifiers/thumbnail_provider.cpp
     presentation/notifiers/video_frame_provider.cpp
     presentation/notifiers/video_thumbnail_provider.cpp
+    presentation/notifiers/audio_waveform_provider.cpp
 )
 
 set(VIDEO_EDITOR_HEADERS
@@ -98,6 +99,7 @@ set(VIDEO_EDITOR_HEADERS
     presentation/notifiers/thumbnail_provider.h
     presentation/notifiers/video_frame_provider.h
     presentation/notifiers/video_thumbnail_provider.h
+    presentation/notifiers/audio_waveform_provider.h
 )
 
 add_library(gopost_video_editor_lib STATIC

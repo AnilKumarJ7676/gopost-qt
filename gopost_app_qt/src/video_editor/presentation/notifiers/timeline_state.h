@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <memory>
 #include <optional>
@@ -42,6 +43,7 @@ struct TimelineState {
     std::shared_ptr<VideoProject> project;
     PlaybackState playback;
     std::optional<int> selectedClipId;
+    QSet<int> selectedClipIds;        // Feature 13: multi-select clip IDs
     double pixelsPerSecond = 80.0;
     double scrollOffset    = 0.0;
     double trackHeight     = 68.0;
@@ -51,6 +53,22 @@ struct TimelineState {
     BottomPanelTab activePanel = BottomPanelTab::timeline;
     bool useProxyPlayback  = true;
     bool autoFitEnabled    = true;
+
+    // Ripple mode: when enabled, deleting or trimming clips auto-closes gaps
+    bool rippleMode = false;
+
+    // Insert mode: true=insert (push clips right), false=overwrite (replace underneath)
+    bool insertMode = true;
+
+    // Waveform display
+    bool showWaveforms = true;
+    bool waveformStereo = false;  // false=mono, true=stereo L/R
+
+    // Generation counters for fine-grained change tracking.
+    // Delegates bump these before calling setState() so the notifier
+    // can diff and emit only the signals whose category actually changed.
+    int trackGeneration     = 0;   // tracks, clips, markers structure
+    int selectionGeneration = 0;   // selected clip property edits
 
     // Convenience
     bool isReady() const { return phase == TimelinePhase::ready; }

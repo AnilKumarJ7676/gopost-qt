@@ -32,14 +32,76 @@ void AdvancedEditDelegate::insertEdit(int clipId, double atTime) {
             }
         }
     }
+    state.trackGeneration++;
     ops_->setState(std::move(state));
     ops_->pushUndo(before);
 }
 
 void AdvancedEditDelegate::overwriteEdit(int clipId, double atTime) {
-    Q_UNUSED(clipId); Q_UNUSED(atTime);
-    // Overwrite replaces content at atTime without shifting
-    // TODO: Full implementation requires removing overlapping portions
+    auto state = ops_->currentState();
+    if (!state.project) return;
+    auto before = *state.project;
+
+    const VideoClip* srcClip = state.project->findClip(clipId);
+    if (!srcClip) return;
+    const double insertDur = srcClip->duration();
+    const double rangeEnd = atTime + insertDur;
+    const int trackIdx = srcClip->trackIndex;
+
+    if (trackIdx < 0 || trackIdx >= static_cast<int>(state.project->tracks.size()))
+        return;
+
+    auto& track = state.project->tracks[trackIdx];
+    QList<VideoClip> kept;
+    int maxId = 0;
+    for (const auto& t : state.project->tracks)
+        for (const auto& c : t.clips) maxId = std::max(maxId, c.id);
+
+    for (auto& clip : track.clips) {
+        if (clip.id == clipId) { kept.append(clip); continue; }
+
+        // Fully inside overwrite range → remove
+        if (clip.timelineIn >= atTime && clip.timelineOut <= rangeEnd) continue;
+
+        // Overlaps from left
+        if (clip.timelineIn < atTime && clip.timelineOut > atTime && clip.timelineOut <= rangeEnd) {
+            clip.sourceOut = clip.sourceIn + (atTime - clip.timelineIn) * clip.speed;
+            clip.timelineOut = atTime;
+            kept.append(clip); continue;
+        }
+
+        // Overlaps from right
+        if (clip.timelineIn >= atTime && clip.timelineIn < rangeEnd && clip.timelineOut > rangeEnd) {
+            double trimAmt = rangeEnd - clip.timelineIn;
+            clip.sourceIn += trimAmt * clip.speed;
+            clip.timelineIn = rangeEnd;
+            kept.append(clip); continue;
+        }
+
+        // Straddles entire range → split into two
+        if (clip.timelineIn < atTime && clip.timelineOut > rangeEnd) {
+            VideoClip left = clip;
+            left.sourceOut = left.sourceIn + (atTime - left.timelineIn) * left.speed;
+            left.timelineOut = atTime;
+            kept.append(left);
+
+            VideoClip right = clip;
+            right.id = ++maxId;
+            right.sourceIn += (rangeEnd - clip.timelineIn) * right.speed;
+            right.timelineIn = rangeEnd;
+            kept.append(right);
+            continue;
+        }
+
+        // No overlap
+        kept.append(clip);
+    }
+    track.clips = kept;
+
+    state.trackGeneration++;
+    ops_->setState(std::move(state));
+    ops_->pushUndo(before);
+    ops_->syncNativeToProject();
 }
 
 void AdvancedEditDelegate::rollEdit(int clipId, bool leftEdge, double delta) {
@@ -131,6 +193,7 @@ void AdvancedEditDelegate::duplicateClip(int clipId) {
                 dup.timelineOut = dup.timelineIn + clip.duration();
 
                 state.project->tracks[clip.trackIndex].clips.append(std::move(dup));
+                state.trackGeneration++;
                 ops_->setState(std::move(state));
                 ops_->pushUndo(before);
                 ops_->syncNativeToProject();
@@ -145,6 +208,7 @@ void AdvancedEditDelegate::duplicateClip(int clipId) {
 // ---------------------------------------------------------------------------
 
 void AdvancedEditDelegate::setClipSpeed(int clipId, double speed) {
+    qDebug() << "[AdvancedEdit] setClipSpeed: clipId=" << clipId << "speed=" << speed;
     if (speed <= 0.0) return;
     auto state = ops_->currentState();
     if (!state.project) return;
@@ -152,6 +216,8 @@ void AdvancedEditDelegate::setClipSpeed(int clipId, double speed) {
 
     ops_->updateClip(clipId, [speed](const VideoClip& c) {
         VideoClip u = c;
+        qDebug() << "[AdvancedEdit] setClipSpeed: oldSpeed=" << c.speed
+                 << "oldDuration=" << c.duration() << "newSpeed=" << speed;
         const double origDuration = c.duration() * c.speed; // source duration
         u.speed    = speed;
         u.timelineOut = u.timelineIn + (origDuration / speed);
@@ -168,7 +234,7 @@ void AdvancedEditDelegate::reverseClip(int clipId) {
 
     ops_->updateClip(clipId, [](const VideoClip& c) {
         VideoClip u = c;
-        u.speed = -c.speed; // Negative speed indicates reverse
+        u.isReversed = !c.isReversed;
         return u;
     });
     ops_->pushUndo(before);
@@ -203,12 +269,15 @@ std::vector<SpeedRampPreset> AdvancedEditDelegate::speedRampPresets() {
 }
 
 void AdvancedEditDelegate::applySpeedRamp(int clipId, const SpeedRampPreset& preset) {
+    qDebug() << "[AdvancedEdit] applySpeedRamp: clipId=" << clipId << "preset=" << preset.name;
     auto state = ops_->currentState();
     if (!state.project) return;
     auto before = *state.project;
 
     ops_->updateClip(clipId, [&preset](const VideoClip& c) {
         VideoClip u = c;
+        qDebug() << "[AdvancedEdit] applySpeedRamp: clipDuration=" << c.duration()
+                 << "keyframeCount=" << preset.keyframes.size();
         // Build a keyframe track for the Speed property from the preset
         KeyframeTrack speedTrack;
         speedTrack.property = KeyframeProperty::Speed;
@@ -216,6 +285,80 @@ void AdvancedEditDelegate::applySpeedRamp(int clipId, const SpeedRampPreset& pre
             speedTrack.keyframes.append(Keyframe{normTime * c.duration(), speed});
         }
         u.keyframes = u.keyframes.updateTrack(speedTrack);
+        return u;
+    });
+    ops_->pushUndo(before);
+}
+
+void AdvancedEditDelegate::addSpeedRampPoint(int clipId, double normalizedTime, double speed) {
+    if (speed <= 0.0) speed = 0.01;
+    auto state = ops_->currentState();
+    if (!state.project) return;
+    auto before = *state.project;
+
+    ops_->updateClip(clipId, [normalizedTime, speed](const VideoClip& c) {
+        VideoClip u = c;
+        double absTime = normalizedTime * c.duration();
+        auto* existing = u.keyframes.trackFor(KeyframeProperty::Speed);
+        KeyframeTrack track = existing
+            ? existing->addKeyframe({absTime, speed, KeyframeInterpolation::EaseInOut})
+            : KeyframeTrack{KeyframeProperty::Speed, {{absTime, speed, KeyframeInterpolation::EaseInOut}}};
+        if (!existing) {
+            // Ensure we have start and end points for a valid ramp
+            if (absTime > 0.01)
+                track = track.addKeyframe({0.0, c.speed, KeyframeInterpolation::EaseInOut});
+            if (absTime < c.duration() - 0.01)
+                track = track.addKeyframe({c.duration(), c.speed, KeyframeInterpolation::EaseInOut});
+        }
+        u.keyframes = u.keyframes.updateTrack(track);
+        return u;
+    });
+    ops_->pushUndo(before);
+}
+
+void AdvancedEditDelegate::removeSpeedRampPoint(int clipId, double time) {
+    auto state = ops_->currentState();
+    if (!state.project) return;
+    auto before = *state.project;
+
+    ops_->updateClip(clipId, [time](const VideoClip& c) {
+        VideoClip u = c;
+        const auto* track = u.keyframes.trackFor(KeyframeProperty::Speed);
+        if (track) {
+            auto updated = track->removeKeyframeAt(time);
+            u.keyframes = u.keyframes.updateTrack(updated);
+        }
+        return u;
+    });
+    ops_->pushUndo(before);
+}
+
+void AdvancedEditDelegate::moveSpeedRampPoint(int clipId, double oldTime, double newTime, double newSpeed) {
+    if (newSpeed <= 0.0) newSpeed = 0.01;
+    auto state = ops_->currentState();
+    if (!state.project) return;
+    auto before = *state.project;
+
+    ops_->updateClip(clipId, [oldTime, newTime, newSpeed](const VideoClip& c) {
+        VideoClip u = c;
+        const auto* track = u.keyframes.trackFor(KeyframeProperty::Speed);
+        if (track) {
+            auto updated = track->moveKeyframe(oldTime, newTime, newSpeed);
+            u.keyframes = u.keyframes.updateTrack(updated);
+        }
+        return u;
+    });
+    ops_->pushUndo(before);
+}
+
+void AdvancedEditDelegate::clearSpeedRamp(int clipId) {
+    auto state = ops_->currentState();
+    if (!state.project) return;
+    auto before = *state.project;
+
+    ops_->updateClip(clipId, [](const VideoClip& c) {
+        VideoClip u = c;
+        u.keyframes = u.keyframes.removeTrack(KeyframeProperty::Speed);
         return u;
     });
     ops_->pushUndo(before);
@@ -237,33 +380,139 @@ int AdvancedEditDelegate::nextMarkerId() const {
 void AdvancedEditDelegate::addMarker(MarkerType type, const QString& label) {
     auto state = ops_->currentState();
     if (!state.project) return;
+    auto before = *state.project;
 
     TimelineMarker marker;
     marker.id              = nextMarkerId();
     marker.type            = type;
-    marker.label           = label;
+    marker.label           = label.isEmpty() ? QStringLiteral("Marker") : label;
     marker.positionSeconds = state.playback.positionSeconds;
+    marker.color           = TimelineMarker::defaultColorForType(type);
     state.project->markers.append(std::move(marker));
+    state.trackGeneration++;
     ops_->setState(std::move(state));
+    ops_->pushUndo(before);
+}
+
+void AdvancedEditDelegate::addMarkerAtPosition(double positionSeconds, MarkerType type,
+                                                const QString& label, const QString& color) {
+    auto state = ops_->currentState();
+    if (!state.project) return;
+    auto before = *state.project;
+
+    TimelineMarker marker;
+    marker.id              = nextMarkerId();
+    marker.type            = type;
+    marker.label           = label.isEmpty() ? QStringLiteral("Marker") : label;
+    marker.positionSeconds = positionSeconds;
+    marker.color           = color.isEmpty() ? TimelineMarker::defaultColorForType(type) : color;
+    state.project->markers.append(std::move(marker));
+    state.trackGeneration++;
+    ops_->setState(std::move(state));
+    ops_->pushUndo(before);
+}
+
+void AdvancedEditDelegate::addClipMarker(int clipId, MarkerType type, const QString& label) {
+    auto state = ops_->currentState();
+    if (!state.project) return;
+    auto before = *state.project;
+
+    const auto* clip = state.project->findClip(clipId);
+    if (!clip) return;
+
+    TimelineMarker marker;
+    marker.id              = nextMarkerId();
+    marker.type            = type;
+    marker.label           = label.isEmpty() ? QStringLiteral("Clip Marker") : label;
+    marker.positionSeconds = state.playback.positionSeconds;
+    marker.color           = TimelineMarker::defaultColorForType(type);
+    marker.clipId          = clipId;
+    state.project->markers.append(std::move(marker));
+    state.trackGeneration++;
+    ops_->setState(std::move(state));
+    ops_->pushUndo(before);
+}
+
+void AdvancedEditDelegate::addMarkerRegion(double startSeconds, double endSeconds,
+                                            MarkerType type, const QString& label) {
+    auto state = ops_->currentState();
+    if (!state.project) return;
+    if (endSeconds <= startSeconds) return;
+    auto before = *state.project;
+
+    TimelineMarker marker;
+    marker.id                 = nextMarkerId();
+    marker.type               = type;
+    marker.label              = label.isEmpty() ? QStringLiteral("Region") : label;
+    marker.positionSeconds    = startSeconds;
+    marker.endPositionSeconds = endSeconds;
+    marker.color              = TimelineMarker::defaultColorForType(type);
+    state.project->markers.append(std::move(marker));
+    state.trackGeneration++;
+    ops_->setState(std::move(state));
+    ops_->pushUndo(before);
 }
 
 void AdvancedEditDelegate::removeMarker(int markerId) {
     auto state = ops_->currentState();
     if (!state.project) return;
+    auto before = *state.project;
     auto& markers = state.project->markers;
     markers.removeIf([markerId](const TimelineMarker& m) {
         return m.id == markerId;
     });
+    state.trackGeneration++;
     ops_->setState(std::move(state));
+    ops_->pushUndo(before);
 }
 
 void AdvancedEditDelegate::updateMarker(int markerId, const QString& label) {
     auto state = ops_->currentState();
     if (!state.project) return;
+    auto before = *state.project;
     for (auto& m : state.project->markers) {
         if (m.id == markerId) { m.label = label; break; }
     }
+    state.trackGeneration++;
     ops_->setState(std::move(state));
+    ops_->pushUndo(before);
+}
+
+void AdvancedEditDelegate::updateMarkerFull(int markerId, const QString& label,
+                                             const QString& notes, const QString& color, int type) {
+    auto state = ops_->currentState();
+    if (!state.project) return;
+    auto before = *state.project;
+    for (auto& m : state.project->markers) {
+        if (m.id == markerId) {
+            if (!label.isEmpty()) m.label = label;
+            m.notes = notes;
+            if (!color.isEmpty()) m.color = color;
+            if (type >= 0 && type <= 3) m.type = static_cast<MarkerType>(type);
+            break;
+        }
+    }
+    state.trackGeneration++;
+    ops_->setState(std::move(state));
+    ops_->pushUndo(before);
+}
+
+void AdvancedEditDelegate::updateMarkerPosition(int markerId, double positionSeconds) {
+    auto state = ops_->currentState();
+    if (!state.project) return;
+    auto before = *state.project;
+    for (auto& m : state.project->markers) {
+        if (m.id == markerId) {
+            double delta = positionSeconds - m.positionSeconds;
+            m.positionSeconds = positionSeconds;
+            if (m.endPositionSeconds.has_value())
+                m.endPositionSeconds = *m.endPositionSeconds + delta;
+            break;
+        }
+    }
+    state.trackGeneration++;
+    ops_->setState(std::move(state));
+    ops_->pushUndo(before);
 }
 
 void AdvancedEditDelegate::navigateToMarker(int markerId) {

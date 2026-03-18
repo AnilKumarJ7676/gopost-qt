@@ -10,18 +10,23 @@
 namespace gopost::video_editor {
 
 // ---------------------------------------------------------------------------
+// PlaybackState enum — explicit state machine for the playback controller.
+// ---------------------------------------------------------------------------
+enum class PlaybackStatus { Stopped, Playing, Paused, Seeking };
+
+// ---------------------------------------------------------------------------
 // PlaybackDelegate — play/pause, seek, shuttle, zoom, snap, render pipeline
 //
-// Converted 1:1 from playback_delegate.dart.
-// Plain C++ class (not QObject); timer callbacks are forwarded from the
-// owning TimelineNotifier which *is* a QObject.
+// Acts as the PlaybackController for the timeline engine.
+// Uses real elapsed time (steady_clock) for frame-accurate playback that
+// compensates for timer jitter and variable frame times.
 // ---------------------------------------------------------------------------
 class PlaybackDelegate {
 public:
     // Constants
     static constexpr double kMinZoom        = 0.01;
     static constexpr double kMaxZoom        = 400.0;
-    static constexpr int    kPlaybackTickMs = 33;   // ~30 fps
+    static constexpr int    kPlaybackTickMs = 33;   // ~30 fps target
 
     explicit PlaybackDelegate(TimelineOperations* ops);
     ~PlaybackDelegate();
@@ -35,6 +40,12 @@ public:
     void stepBackward();
     void jumpToStart();
     void jumpToEnd();
+
+    // ---- state queries -----------------------------------------------------
+    PlaybackStatus status() const { return status_; }
+    double playbackRate() const;
+    double getProgress() const;
+    double getDuration() const;
 
     // ---- JKL shuttle -------------------------------------------------------
     void shuttleForward();
@@ -70,6 +81,13 @@ public:
 
 private:
     TimelineOperations* ops_;
+
+    // Playback state machine
+    PlaybackStatus status_ = PlaybackStatus::Stopped;
+    bool wasPlayingBeforeSeek_ = false;
+
+    // Real-time tick tracking (compensates for timer jitter)
+    std::chrono::steady_clock::time_point lastTickTime_;
 
     // Shuttle state
     int shuttleSpeed_ = 0;   // -3..-1, 0, 1..3

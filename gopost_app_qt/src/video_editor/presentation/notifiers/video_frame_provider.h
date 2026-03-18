@@ -21,9 +21,13 @@ public:
     /// Returns true if at least one frame has been rendered.
     bool hasFrame() const;
 
+    /// Use fast (nearest-neighbor) scaling during playback for performance.
+    void setPlaybackMode(bool playing);
+
 private:
     mutable QMutex mutex_;
     QImage currentFrame_;
+    bool playbackMode_ = false;
 };
 
 } // namespace gopost::video_editor

@@ -57,6 +57,18 @@ public:
     // ---- clip update helper ------------------------------------------------
     void updateClipDuration(int clipId, double duration);
 
+    // ---- clip color / label ------------------------------------------------
+    void setClipColorTag(int clipId, const QString& colorHex);
+    void clearClipColorTag(int clipId);
+    void setClipCustomLabel(int clipId, const QString& label);
+
+    // ---- track color -------------------------------------------------------
+    void setTrackColor(int trackIndex, const QString& colorHex);
+    void clearTrackColor(int trackIndex);
+
+    // Next available clip id (public for splitAllAtPlayhead)
+    int nextClipId() const;
+
 private:
     TimelineOperations* ops_;
 
@@ -67,9 +79,6 @@ private:
     // Magnetic snapping
     double magneticSnap(const VideoTrack& track, double position,
                         int excludeClipId = -1) const;
-
-    // Next available clip id
-    int nextClipId() const;
 };
 
 } // namespace gopost::video_editor

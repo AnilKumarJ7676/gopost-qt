@@ -48,12 +48,24 @@ public:
 
     // ---- speed ramp ---------------------------------------------------------
     void applySpeedRamp(int clipId, const SpeedRampPreset& preset);
+    void addSpeedRampPoint(int clipId, double normalizedTime, double speed);
+    void removeSpeedRampPoint(int clipId, double time);
+    void moveSpeedRampPoint(int clipId, double oldTime, double newTime, double newSpeed);
+    void clearSpeedRamp(int clipId);
     static std::vector<SpeedRampPreset> speedRampPresets();
 
     // ---- markers ------------------------------------------------------------
     void addMarker(MarkerType type, const QString& label = {});
+    void addMarkerAtPosition(double positionSeconds, MarkerType type,
+                             const QString& label, const QString& color = {});
+    void addClipMarker(int clipId, MarkerType type, const QString& label);
+    void addMarkerRegion(double startSeconds, double endSeconds,
+                         MarkerType type, const QString& label);
     void removeMarker(int markerId);
     void updateMarker(int markerId, const QString& label);
+    void updateMarkerFull(int markerId, const QString& label,
+                          const QString& notes, const QString& color, int type);
+    void updateMarkerPosition(int markerId, double positionSeconds);
     void navigateToMarker(int markerId);
     void navigateToNextMarker();
     void navigateToPreviousMarker();

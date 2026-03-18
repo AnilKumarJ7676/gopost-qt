@@ -54,7 +54,9 @@ Item {
             // Audio output (must be declared before MediaPlayer references it)
             AudioOutput {
                 id: audioOut
-                volume: 1.0
+                volume: timelineNotifier && !timelineNotifier.activeClipMuted
+                        ? timelineNotifier.activeClipVolume : 0.0
+                muted: timelineNotifier ? timelineNotifier.activeClipMuted : false
             }
 
             // Layer 1: MediaPlayer + VideoOutput + AudioOutput for real playback
@@ -63,6 +65,7 @@ Item {
                 videoOutput: videoOut
                 audioOutput: audioOut
                 source: ""
+                playbackRate: timelineNotifier ? timelineNotifier.activeClipSpeed : 1.0
 
                 onMediaStatusChanged: {
                     console.log("[VE2Preview] MediaPlayer status:", mediaStatus,
@@ -85,6 +88,20 @@ Item {
                 anchors.margins: 4
                 fillMode: VideoOutput.PreserveAspectFit
                 visible: player.hasVideo
+            }
+
+            // Separate audio player for audio-only clips on Audio tracks
+            AudioOutput {
+                id: audioOnlyOut
+                volume: timelineNotifier && !timelineNotifier.activeAudioMuted
+                        ? timelineNotifier.activeAudioVolume : 0.0
+                muted: timelineNotifier ? timelineNotifier.activeAudioMuted : false
+            }
+            MediaPlayer {
+                id: audioPlayer
+                audioOutput: audioOnlyOut
+                source: ""
+                playbackRate: timelineNotifier ? timelineNotifier.activeClipSpeed : 1.0
             }
 
             // "No media" placeholder
@@ -217,10 +234,25 @@ Item {
         target: timelineNotifier
         enabled: timelineNotifier !== null
 
+        function onPlaybackChanged() {
+            internal.syncSource()
+            internal.syncPlayState()
+            internal.syncAudio()
+            internal.commitPlayState()
+            if (!player.hasVideo) internal.refreshStub()
+        }
+
+        function onTracksChanged() {
+            internal.syncSource()
+            internal.syncAudio()
+            internal.commitPlayState()
+        }
+
         function onStateChanged() {
             internal.syncSource()
             internal.syncPlayState()
-            // Only refresh stub when MediaPlayer has no video (fallback mode)
+            internal.syncAudio()
+            internal.commitPlayState()
             if (!player.hasVideo) internal.refreshStub()
         }
 
@@ -247,8 +279,47 @@ Item {
         id: internal
 
         property string currentSource: ""
+        property string currentAudioSource: ""
         property bool wasPlaying: false
         property double lastPos: -1  // previous C++ position — for detecting user jumps
+
+        // Sync audio-only clip playback
+        function syncAudio() {
+            if (!timelineNotifier) return
+
+            var audioSrc = timelineNotifier.activeAudioSource
+            if (audioSrc !== "" && audioSrc !== currentAudioSource) {
+                currentAudioSource = audioSrc
+                audioPlayer.source = pathToUrl(audioSrc)
+                var audioOffset = timelineNotifier.activeAudioOffset
+                var posMs = audioOffset >= 0 ? Math.round(audioOffset * 1000) : 0
+                if (posMs >= 0) audioPlayer.position = posMs
+                if (timelineNotifier.isPlaying) audioPlayer.play()
+                else audioPlayer.pause()
+            } else if (audioSrc === "" && currentAudioSource !== "") {
+                currentAudioSource = ""
+                audioPlayer.stop()
+                audioPlayer.source = ""
+            }
+
+            // Sync play/pause
+            if (audioPlayer.source != "") {
+                var playing = timelineNotifier.isPlaying
+                if (playing && !wasPlaying) {
+                    var ao = timelineNotifier.activeAudioOffset
+                    if (ao >= 0) audioPlayer.position = Math.round(ao * 1000)
+                    audioPlayer.play()
+                } else if (!playing && wasPlaying) {
+                    audioPlayer.pause()
+                    var ao2 = timelineNotifier.activeAudioOffset
+                    if (ao2 >= 0) audioPlayer.position = Math.round(ao2 * 1000)
+                } else if (!playing) {
+                    var ao3 = timelineNotifier.activeAudioOffset
+                    if (ao3 >= 0 && Math.abs(audioPlayer.position - Math.round(ao3 * 1000)) > 100)
+                        audioPlayer.position = Math.round(ao3 * 1000)
+                }
+            }
+        }
 
         // Load the video file into MediaPlayer when activeClipSource changes
         function syncSource() {
@@ -279,7 +350,11 @@ Item {
         // Key principle: during normal playback, let MediaPlayer run freely.
         // Only seek on play/pause transitions, user-initiated jumps, or scrubbing.
         function syncPlayState() {
-            if (!timelineNotifier || !player.hasVideo) return
+            if (!timelineNotifier) return
+            // No video loaded — nothing to sync for the video player
+            if (!player.hasVideo && player.source == "") {
+                return
+            }
 
             var playing = timelineNotifier.isPlaying
             var pos = timelineNotifier.position  // timeline position in seconds
@@ -312,8 +387,14 @@ Item {
                 // EndOfMedia is handled by the player.onPlaybackStateChanged connection above.
             }
 
-            lastPos = pos
-            wasPlaying = playing
+        }
+
+        // Update wasPlaying/lastPos AFTER both syncPlayState and syncAudio
+        // so both functions see the previous state for transition detection.
+        function commitPlayState() {
+            if (!timelineNotifier) return
+            wasPlaying = timelineNotifier.isPlaying
+            lastPos = timelineNotifier.position
         }
 
         function pathToUrl(path) {

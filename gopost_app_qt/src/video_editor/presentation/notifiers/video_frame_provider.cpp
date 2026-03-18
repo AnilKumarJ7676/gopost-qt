@@ -23,7 +23,9 @@ QImage VideoFrameProvider::requestImage(const QString& id, QSize* size, const QS
     if (size) *size = currentFrame_.size();
 
     if (requestedSize.isValid() && requestedSize != currentFrame_.size()) {
-        return currentFrame_.scaled(requestedSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        auto mode = playbackMode_ ? Qt::FastTransformation
+                                  : Qt::SmoothTransformation;
+        return currentFrame_.scaled(requestedSize, Qt::KeepAspectRatio, mode);
     }
     return currentFrame_;
 }
@@ -36,6 +38,11 @@ void VideoFrameProvider::updateFrame(const QImage& frame) {
 bool VideoFrameProvider::hasFrame() const {
     QMutexLocker lock(&mutex_);
     return !currentFrame_.isNull();
+}
+
+void VideoFrameProvider::setPlaybackMode(bool playing) {
+    QMutexLocker lock(&mutex_);
+    playbackMode_ = playing;
 }
 
 } // namespace gopost::video_editor

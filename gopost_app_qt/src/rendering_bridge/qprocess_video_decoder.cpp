@@ -229,6 +229,20 @@ bool QProcessVideoDecoder::seekTo(double timestampSeconds) {
 
     timestampSeconds = std::clamp(timestampSeconds, 0.0, duration_);
 
+    // If seeking forward by a short distance and the ffmpeg process is
+    // still running, decode and discard frames instead of killing/restarting
+    // the process.  On Windows, process creation costs 10-50ms.
+    double delta = timestampSeconds - currentTime_;
+    if (delta > 0 && delta < 2.0 && ffmpeg_ &&
+        ffmpeg_->state() == QProcess::Running) {
+        int framesToSkip = static_cast<int>(delta * fps_);
+        for (int i = 0; i < framesToSkip; ++i) {
+            auto f = decodeNextFrame();
+            if (!f.has_value()) break;
+        }
+        return true;
+    }
+
     if (!startDecodeProcess(timestampSeconds)) return false;
 
     currentTime_ = timestampSeconds;

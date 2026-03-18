@@ -62,6 +62,10 @@ public:
     // --- TimelinePlayback ---
     void seek(int timelineId, double positionSeconds) override;
     std::optional<DecodedImage> renderFrame(int timelineId) override;
+
+    /// Render at explicit preview dimensions (avoids full 1920x1080 compositing).
+    std::optional<DecodedImage> renderFrame(int timelineId,
+                                             int previewW, int previewH);
     double getPosition(int timelineId) override;
     void setFrameCacheSizeBytes(int timelineId, int maxBytes) override;
     void invalidateFrameCache(int timelineId) override;
@@ -160,12 +164,61 @@ public:
     void resizeTextureBridge(int width, int height) override;
     std::optional<QByteArray> getTextureBridgePixels() override;
 
+    // ---- Data structs for per-clip rendering state -------------------------
+
+    struct ColorGradingParams {
+        double brightness = 0, contrast = 0, saturation = 0;
+        double exposure = 0, temperature = 0, tint = 0;
+        double highlights = 0, shadows = 0, vibrance = 0, hue = 0;
+        bool isDefault() const {
+            return brightness == 0 && contrast == 0 && saturation == 0 &&
+                   exposure == 0 && temperature == 0 && tint == 0 &&
+                   highlights == 0 && shadows == 0 && vibrance == 0 && hue == 0;
+        }
+    };
+
+    struct EffectData {
+        int type = 0;      // maps to EffectType enum value
+        double value = 0;
+        bool enabled = true;
+        double mix = 1.0;
+        int instanceId = 0;
+    };
+
+    struct TransitionData {
+        int type = 0;           // maps to TransitionType enum
+        double durationSec = 0;
+        int easing = 0;         // maps to EasingCurve enum
+    };
+
+    struct KeyframeData {
+        double time = 0;
+        double value = 0;
+        int interpolation = 0; // 0=Linear,1=Bezier,2=Hold,3=EaseIn,4=EaseOut,5=EaseInOut
+    };
+
+    struct AudioParams {
+        double volume = 1.0;
+        double pan = 0.0;
+        double fadeIn = 0.0;
+        double fadeOut = 0.0;
+        bool muted = false;
+    };
+
+    struct TrackAudioParams {
+        double volume = 1.0;
+        double pan = 0.0;
+        bool mute = false;
+        bool solo = false;
+    };
+
 private:
     struct StubClip {
         int id = 0;
         int trackIndex = 0;
         VideoClipSourceType sourceType = VideoClipSourceType::Video;
         QString sourcePath;
+        QString displayName;
         TimelineRange timelineRange;
         SourceRange sourceRange;
         double speed = 1.0;
@@ -179,32 +232,71 @@ private:
         std::vector<StubClip> clips;
     };
 
+    // ---- Core helpers ----
     void checkTimeline(int id);
     double computeDuration(int timelineId);
     StubClip* findClip(int timelineId, int clipId);
 
+    // ---- Rendering helpers ----
+    void applyColorGrading(QImage& img, int clipId);
+    void applyEffects(QImage& img, int clipId);
+    void applyTransform(QImage& img, int clipId, double localTime, int w, int h);
+    void compositeFrame(QImage& dst, const QImage& src, double opacity, int blendMode);
+    void renderTextLayer(QImage& img, const TextLayerData& td, int w, int h);
+    void renderClipContent(QImage& clipFrame, const StubClip* clip,
+                           double pos, int w, int h);
+
+    // ---- Effect pixel operations ----
+    static void applyBoxBlur(QImage& img, double radius);
+    static void applyPixelate(QImage& img, int blockSize);
+    static void applyGlitch(QImage& img, double amount, int seed);
+    static void applyChromatic(QImage& img, double amount);
+    static void applyVignette(QImage& img, double amount);
+    static void applyGrain(QImage& img, double amount, int seed);
+    static void applySepia(QImage& img, double amount);
+    static void applyInvert(QImage& img);
+    static void applyPosterize(QImage& img, int levels);
+
+    // ---- Keyframe helpers ----
+    static double evaluateKeyframes(const std::vector<KeyframeData>& kfs, double time);
+    static double applyEasing(double t, int easing);
+
+    // ---- Transition helper ----
+    void renderTransition(QImage& dst, const QImage& outgoing, const QImage& incoming,
+                          double progress, int type, int easing, int w, int h);
+
+    // ---- Core state ----
     std::map<int, TimelineConfig> configs_;
     std::map<int, std::vector<StubTrack>> tracks_;
     std::map<int, double> positions_;
     int nextId_ = 1;
     int nextClipId_ = 1;
     int nextExportId_ = 1;
+    int nextEffectInstanceId_ = 1;
     std::map<int, double> exportProgress_;
     bool decodeEnabled_ = false;
 
-    // Per-clip video decode threads (clip ID → decode thread)
-    // Only populated for VideoClipSourceType::Video clips
+    // ---- Per-clip decode state ----
     std::map<int, std::unique_ptr<RenderDecodeThread>> decoders_;
-
-    // Last decoded frame per clip (cached for repeated renderFrame calls at same position)
     struct CachedFrame {
         RenderDecodedFrame frame;
         double seekedPosition = -1.0;
     };
     std::map<int, CachedFrame> cachedFrames_;
-
-    // Last seeked source time per clip — used to avoid redundant seeks
     std::map<int, double> lastSeekTime_;
+
+    // ---- Per-clip rendering data ----
+    std::map<int, ColorGradingParams> colorGradingParams_;
+    std::map<int, std::vector<EffectData>> clipEffects_;
+    std::map<int, TransitionData> clipTransitionIn_;
+    std::map<int, TransitionData> clipTransitionOut_;
+    std::map<int, std::map<int, std::vector<KeyframeData>>> clipKeyframes_;
+    std::map<int, TextLayerData> clipTextData_;
+    std::map<int, std::vector<std::pair<int, ShapeData>>> clipShapes_;
+    std::map<int, AudioParams> clipAudioParams_;
+
+    // ---- Per-track audio state ----
+    std::map<int, TrackAudioParams> trackAudioParams_;
 };
 
 } // namespace gopost::rendering

@@ -47,6 +47,10 @@ void EffectColorDelegate::removeEffect(int clipId, EffectType type) {
 }
 
 void EffectColorDelegate::toggleEffect(int clipId, EffectType type) {
+    auto state = ops_->currentState();
+    if (!state.project) return;
+    auto before = *state.project;
+
     ops_->updateClip(clipId, [type](const VideoClip& c) {
         VideoClip updated = c;
         for (auto& e : updated.effects) {
@@ -54,6 +58,7 @@ void EffectColorDelegate::toggleEffect(int clipId, EffectType type) {
         }
         return updated;
     });
+    ops_->pushUndo(before);
     ops_->syncEffectsToEngine(clipId);
 }
 

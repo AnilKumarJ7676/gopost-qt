@@ -113,6 +113,7 @@ qt_add_qml_module(gopost_app_qt
         qml/video_editor_2/widgets/VE2TimelinePanel.qml
         qml/video_editor_2/widgets/VE2PropertyPanel.qml
         qml/video_editor_2/widgets/VE2MediaPoolPanel.qml
+        qml/video_editor_2/widgets/VE2EditorSidebar.qml
 )
 
 target_link_libraries(gopost_app_qt PRIVATE

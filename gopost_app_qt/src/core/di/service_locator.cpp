@@ -23,6 +23,7 @@
 #include "video_editor/presentation/notifiers/thumbnail_provider.h"
 #include "video_editor/presentation/notifiers/video_frame_provider.h"
 #include "video_editor/presentation/notifiers/video_thumbnail_provider.h"
+#include "video_editor/presentation/notifiers/audio_waveform_provider.h"
 #include "template_browser/presentation/models/home_notifier.h"
 #include "template_browser/presentation/models/template_list_notifier.h"
 #include "template_browser/presentation/models/template_search_notifier.h"
@@ -155,6 +156,11 @@ void ServiceLocator::registerWithQml(QQmlApplicationEngine* engine) {
     auto* thumbProvider = new video_editor::VideoThumbnailProvider();
     engine->addImageProvider(QStringLiteral("videothumbnail"), thumbProvider);
     qDebug() << "[ServiceLocator] videothumbnail image provider registered";
+
+    // Register audio waveform provider for timeline clip waveforms
+    auto* waveformProvider = new video_editor::AudioWaveformProvider();
+    engine->addImageProvider(QStringLiteral("audiowaveform"), waveformProvider);
+    qDebug() << "[ServiceLocator] audiowaveform image provider registered";
 
     // Core
     setCtx(ctx, QStringLiteral("router"), m_router.get());

@@ -6,19 +6,19 @@ import GopostApp
 /**
  * VideoEditor2Screen — main layout composing all VE2 panels.
  *
- * Layout:
+ * Layout (matches video editor 1 style):
  *   ┌──────────────────────────────────────────────────────┐
- *   │ VE2Toolbar                                           │
- *   ├──────────────┬───────────────────────────────────────┤
- *   │ [Media Pool] │                                       │
- *   │ [Properties] │  Preview Panel                        │
- *   │  (tabbed     │                                       │
- *   │   sidebar)   │                                       │
- *   │              ├── split handle ───────────────────────┤
- *   │              │                                       │
- *   │              │  Timeline Panel                       │
- *   │              │                                       │
- *   └──────────────┴───────────────────────────────────────┘
+ *   │ VE2Toolbar (52px)                                    │
+ *   ├──────────┬───┬───────────────────────────────────────┤
+ *   │ Icon     │   │                                       │
+ *   │ Rail  +  │ ┃ │  Preview Panel                        │
+ *   │ Panel    │ ┃ │                                       │
+ *   │ (sidebar)│ ┃ │                                       │
+ *   ├──────────┴───┴── split handle ───────────────────────┤
+ *   │                                                      │
+ *   │  Timeline Panel                                      │
+ *   │                                                      │
+ *   └──────────────────────────────────────────────────────┘
  *
  * Cross-platform: resizable splitters, touch-friendly on mobile.
  * Initialises the timeline engine on load.
@@ -26,9 +26,8 @@ import GopostApp
 Item {
     id: root
 
-    property real verticalSplit: 0.55   // preview/timeline fraction
-    property real sidebarWidth: 280     // property panel width
-    property int  sidebarTab: 0         // 0 = Media Pool, 1 = Properties
+    property real splitFraction: 0.55     // preview/timeline fraction
+    property real sidebarPanelWidth: 260  // panel area width (excludes icon rail)
 
     Component.onCompleted: {
         console.log("[VE2Screen] onCompleted — size:", width, "x", height)
@@ -46,7 +45,12 @@ Item {
     Shortcut { sequence: "Ctrl+Z"; onActivated: if (timelineNotifier) timelineNotifier.undo() }
     Shortcut { sequence: "Ctrl+Shift+Z"; onActivated: if (timelineNotifier) timelineNotifier.redo() }
     Shortcut { sequence: "Ctrl+B"; onActivated: if (timelineNotifier) timelineNotifier.splitClipAtPlayhead() }
-    Shortcut { sequence: "Delete"; onActivated: internal.deleteSelected() }
+    Shortcut { sequence: "Delete"; onActivated: {
+        if (timelineNotifier) {
+            if (timelineNotifier.selectedClipCount > 1) timelineNotifier.deleteSelectedClips()
+            else internal.deleteSelected()
+        }
+    }}
     Shortcut { sequence: "Shift+Delete"; onActivated: { if (timelineNotifier && timelineNotifier.selectedClipId >= 0) timelineNotifier.rippleDelete(timelineNotifier.selectedClipId) } }
     Shortcut { sequence: "Ctrl+D"; onActivated: { if (timelineNotifier && timelineNotifier.selectedClipId >= 0) timelineNotifier.duplicateClip(timelineNotifier.selectedClipId) } }
     Shortcut { sequence: "Left"; onActivated: if (timelineNotifier) timelineNotifier.stepBackward() }
@@ -68,6 +72,8 @@ Item {
     Shortcut { sequence: "Down"; onActivated: if (timelineNotifier) timelineNotifier.jumpToNextSnapPoint() }
     Shortcut { sequence: "Ctrl+="; onActivated: if (timelineNotifier) timelineNotifier.zoomIn() }
     Shortcut { sequence: "Ctrl+-"; onActivated: if (timelineNotifier) timelineNotifier.zoomOut() }
+    Shortcut { sequence: "Ctrl+A"; onActivated: if (timelineNotifier) timelineNotifier.selectAll() }
+    Shortcut { sequence: "Ctrl+Y"; onActivated: if (timelineNotifier) timelineNotifier.redo() }
 
     ColumnLayout {
         anchors.fill: parent
@@ -80,203 +86,138 @@ Item {
             Layout.preferredHeight: 52
         }
 
-        // === Main content ===
+        // === Main area: upper (sidebar + preview) / lower (timeline) ===
         Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
 
-            // ---- Left sidebar (tabbed: Media Pool / Properties) ----
-            Rectangle {
-                id: sidebar
-                anchors.top: parent.top
-                anchors.bottom: parent.bottom
-                anchors.left: parent.left
-                width: sidebarWidth
-                color: "#0D0D1A"
-                clip: true
-
-                ColumnLayout {
-                    anchors.fill: parent
-                    spacing: 0
-
-                    // Tab bar
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 32
-                        color: "#0A0A18"
-                        Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: "#252540" }
-
-                        RowLayout {
-                            anchors.fill: parent
-                            spacing: 0
-
-                            // Media Pool tab
-                            Rectangle {
-                                Layout.fillWidth: true; Layout.fillHeight: true
-                                color: sidebarTab === 0 ? "#12122A" : "transparent"
-                                Rectangle {
-                                    anchors.bottom: parent.bottom; width: parent.width; height: 2
-                                    color: sidebarTab === 0 ? "#6C63FF" : "transparent"
-                                }
-
-                                Label {
-                                    anchors.centerIn: parent
-                                    text: "Media Pool"
-                                    font.pixelSize: 11
-                                    font.weight: sidebarTab === 0 ? Font.DemiBold : Font.Normal
-                                    color: sidebarTab === 0 ? "#E0E0F0" : "#6B6B88"
-                                }
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.sidebarTab = 0
-                                }
-                            }
-
-                            // Properties tab
-                            Rectangle {
-                                Layout.fillWidth: true; Layout.fillHeight: true
-                                color: sidebarTab === 1 ? "#12122A" : "transparent"
-                                Rectangle {
-                                    anchors.bottom: parent.bottom; width: parent.width; height: 2
-                                    color: sidebarTab === 1 ? "#6C63FF" : "transparent"
-                                }
-
-                                Label {
-                                    anchors.centerIn: parent
-                                    text: "Properties"
-                                    font.pixelSize: 11
-                                    font.weight: sidebarTab === 1 ? Font.DemiBold : Font.Normal
-                                    color: sidebarTab === 1 ? "#E0E0F0" : "#6B6B88"
-                                }
-
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.sidebarTab = 1
-                                }
-                            }
-                        }
-                    }
-
-                    // Panel content
-                    Item {
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-
-                        VE2MediaPoolPanel {
-                            id: mediaPoolPanel
-                            anchors.fill: parent
-                            visible: sidebarTab === 0
-                        }
-
-                        VE2PropertyPanel {
-                            id: propertyPanel
-                            anchors.fill: parent
-                            visible: sidebarTab === 1
-                        }
-                    }
-                }
-            }
-
-            // Sidebar resize handle
-            Rectangle {
-                id: sidebarHandle
-                anchors.top: parent.top
-                anchors.bottom: parent.bottom
-                x: sidebarWidth
-                width: 5
-                color: sidebarHandleMa.containsMouse || sidebarHandleMa.pressed ? "#6C63FF" : "#1E1E38"
-                z: 10
-
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 2; height: 30; radius: 1
-                    color: sidebarHandleMa.containsMouse || sidebarHandleMa.pressed ? Qt.rgba(1,1,1,0.5) : "#353550"
-                }
-
-                MouseArea {
-                    id: sidebarHandleMa
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.SplitHCursor
-                    property real startX: 0
-                    property real startWidth: 0
-
-                    onPressed: mouse => { startX = mapToItem(root, mouse.x, 0).x; startWidth = sidebarWidth }
-                    onPositionChanged: mouse => {
-                        if (pressed) {
-                            var gx = mapToItem(root, mouse.x, 0).x
-                            var newW = startWidth + (gx - startX)
-                            root.sidebarWidth = Math.max(0, Math.min(newW, root.width * 0.4))
-                        }
-                    }
-                    onDoubleClicked: root.sidebarWidth = root.sidebarWidth > 0 ? 0 : 280
-                }
-            }
-
-            // Right content area (preview + timeline)
             Column {
-                anchors.top: parent.top
-                anchors.bottom: parent.bottom
-                anchors.left: sidebarHandle.right
-                anchors.right: parent.right
+                anchors.fill: parent
 
-                // Preview panel
-                VE2PreviewPanel {
-                    id: previewPanel
+                // === Upper panel: icon rail + sidebar + video preview ===
+                Item {
+                    id: upperPanel
                     width: parent.width
                     height: {
-                        var avail = parent.height - hSplitHandle.height
-                        return Math.max(100, avail * root.verticalSplit)
+                        var available = parent.height - splitHandle.height
+                        return Math.max(0, available * root.splitFraction)
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        spacing: 0
+
+                        // Icon rail + sidebar panels (VE2EditorSidebar includes both)
+                        VE2EditorSidebar {
+                            id: editorSidebar
+                            Layout.preferredWidth: editorSidebar.iconRailWidth + (editorSidebar.panelOpen ? root.sidebarPanelWidth : 0)
+                            Layout.fillHeight: true
+                        }
+
+                        // Sidebar splitter handle
+                        Rectangle {
+                            Layout.preferredWidth: 6
+                            Layout.fillHeight: true
+                            color: sidebarSplitterMa.containsMouse || sidebarSplitterMa.pressed ? "#6C63FF" : "#252540"
+
+                            Rectangle {
+                                anchors.centerIn: parent
+                                width: 2; height: 40
+                                radius: 1
+                                color: sidebarSplitterMa.containsMouse || sidebarSplitterMa.pressed ? Qt.rgba(1,1,1,0.6) : "#404060"
+                            }
+
+                            MouseArea {
+                                id: sidebarSplitterMa
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.SplitHCursor
+                                property real startX: 0
+                                property real startWidth: 0
+
+                                onPressed: function(mouse) {
+                                    startX = mouse.x
+                                    startWidth = root.sidebarPanelWidth
+                                }
+                                onPositionChanged: function(mouse) {
+                                    if (pressed) {
+                                        var newWidth = startWidth + (mouse.x - startX)
+                                        if (newWidth < 80) newWidth = 0
+                                        root.sidebarPanelWidth = Math.max(0, Math.min(newWidth, 500))
+                                        if (newWidth < 80) editorSidebar.panelOpen = false
+                                        else if (!editorSidebar.panelOpen) editorSidebar.panelOpen = true
+                                    }
+                                }
+                                onDoubleClicked: {
+                                    if (editorSidebar.panelOpen) {
+                                        editorSidebar.panelOpen = false
+                                    } else {
+                                        editorSidebar.panelOpen = true
+                                        root.sidebarPanelWidth = 260
+                                    }
+                                }
+                            }
+                        }
+
+                        // Video preview
+                        VE2PreviewPanel {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                        }
                     }
                 }
 
-                // Horizontal split handle
+                // === Horizontal split handle ===
                 Rectangle {
-                    id: hSplitHandle
+                    id: splitHandle
                     width: parent.width
-                    height: 5
-                    color: hSplitMa.containsMouse || hSplitMa.pressed ? "#6C63FF" : "#1E1E38"
+                    height: 6
+                    color: splitHandleMa.containsMouse || splitHandleMa.pressed ? "#6C63FF" : "#252540"
 
                     Rectangle {
                         anchors.centerIn: parent
-                        width: 36; height: 2; radius: 1
-                        color: hSplitMa.containsMouse || hSplitMa.pressed ? Qt.rgba(1,1,1,0.5) : "#353550"
+                        width: 40; height: 2; radius: 1
+                        color: splitHandleMa.containsMouse || splitHandleMa.pressed
+                               ? Qt.rgba(1, 1, 1, 0.6) : "#404060"
                     }
 
                     MouseArea {
-                        id: hSplitMa
+                        id: splitHandleMa
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.SizeVerCursor
+
                         property real dragStartY: 0
                         property real dragStartFrac: 0
 
-                        onPressed: mouse => {
-                            dragStartY = mapToItem(previewPanel.parent, 0, mouse.y).y
-                            dragStartFrac = root.verticalSplit
+                        onPressed: function(mouse) {
+                            dragStartY = mapToItem(upperPanel.parent, 0, mouse.y).y
+                            dragStartFrac = root.splitFraction
                         }
-                        onPositionChanged: mouse => {
+                        onPositionChanged: function(mouse) {
                             if (pressed) {
-                                var gy = mapToItem(previewPanel.parent, 0, mouse.y).y
-                                var total = previewPanel.parent.height - hSplitHandle.height
-                                if (total <= 0) return
-                                var delta = (gy - dragStartY) / total
-                                root.verticalSplit = Math.max(0.15, Math.min(0.85, dragStartFrac + delta))
+                                var globalY = mapToItem(upperPanel.parent, 0, mouse.y).y
+                                var totalHeight = upperPanel.parent.height - splitHandle.height
+                                if (totalHeight <= 0) return
+                                var delta = (globalY - dragStartY) / totalHeight
+                                root.splitFraction = Math.max(0.15, Math.min(0.85, dragStartFrac + delta))
                             }
                         }
                     }
                 }
 
-                // Timeline panel
-                VE2TimelinePanel {
-                    id: timelinePanel
+                // === Lower panel: timeline ===
+                Item {
+                    id: lowerPanel
                     width: parent.width
                     height: {
-                        var avail = parent.height - hSplitHandle.height
-                        return Math.max(80, avail - avail * root.verticalSplit)
+                        var available = parent.height - splitHandle.height
+                        return Math.max(80, available - available * root.splitFraction)
+                    }
+
+                    VE2TimelinePanel {
+                        id: timelinePanel
+                        anchors.fill: parent
                     }
                 }
             }

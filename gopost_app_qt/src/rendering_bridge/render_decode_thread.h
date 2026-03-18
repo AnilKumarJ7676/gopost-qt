@@ -26,7 +26,7 @@ namespace gopost::rendering {
 
 class RenderDecodeThread {
 public:
-    explicit RenderDecodeThread(int bufferCapacity = 8);
+    explicit RenderDecodeThread(int bufferCapacity = 24);
     ~RenderDecodeThread();
 
     RenderDecodeThread(const RenderDecodeThread&) = delete;

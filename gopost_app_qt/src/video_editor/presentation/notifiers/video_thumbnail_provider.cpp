@@ -165,7 +165,7 @@ QQuickImageResponse* VideoThumbnailProvider::requestImageResponse(
 
     // Queue for batch extraction
     auto* response = new BatchThumbnailResponse();
-    BatchCoordinator::PendingRequest req{timeSec, height, response};
+    BatchCoordinator::PendingRequest req{timeSec, height, response, response->aliveFlag()};
     coordinator_->enqueue(filePath, req);
     return response;
 }
@@ -175,6 +175,11 @@ QQuickImageResponse* VideoThumbnailProvider::requestImageResponse(
 BatchThumbnailResponse::BatchThumbnailResponse()
     : QQuickImageResponse()
 {
+}
+
+BatchThumbnailResponse::~BatchThumbnailResponse() {
+    // Signal worker threads that this response is destroyed
+    alive_->store(false, std::memory_order_release);
 }
 
 void BatchThumbnailResponse::deliver(const QImage& img) {
@@ -227,7 +232,9 @@ void BatchCoordinator::dispatchBatches() {
 
         QList<BatchFileWorker::Request> workerRequests;
         for (const auto& req : it.value()) {
-            workerRequests.append({req.timeSec, req.height, req.response});
+            // Skip already-deleted responses (QML destroyed the Image element)
+            if (!req.alive || !req.alive->load(std::memory_order_acquire)) continue;
+            workerRequests.append({req.timeSec, req.height, req.response, req.alive});
         }
 
         totalRequests += workerRequests.size();
@@ -291,12 +298,21 @@ void BatchFileWorker::run() {
     int cached = 0;
 
     for (auto& req : requests_) {
+        // Thread-safe guard: skip if QML destroyed the response object
+        if (!req.alive || !req.alive->load(std::memory_order_acquire)) continue;
+
         QString cacheKey = filePath_ + "@" + QString::number(req.timeSec, 'f', 1);
 
         // Check cache (may have been filled by a duplicate request in this batch)
         QImage img = cache_->get(cacheKey);
         if (!img.isNull()) {
-            req.response->deliver(img);
+            // Deliver on main thread to avoid cross-thread access
+            auto alive = req.alive;
+            auto* resp = req.response;
+            QMetaObject::invokeMethod(coordinator_, [alive, resp, img]() {
+                if (alive->load(std::memory_order_acquire))
+                    resp->deliver(img);
+            }, Qt::QueuedConnection);
             cached++;
             continue;
         }
@@ -305,7 +321,13 @@ void BatchFileWorker::run() {
         img = extractFramePipe(filePath_, req.timeSec, width, req.height);
 
         cache_->insert(cacheKey, img);
-        req.response->deliver(img);
+        // Deliver on main thread to avoid cross-thread access
+        auto alive = req.alive;
+        auto* resp = req.response;
+        QMetaObject::invokeMethod(coordinator_, [alive, resp, img]() {
+            if (alive->load(std::memory_order_acquire))
+                resp->deliver(img);
+        }, Qt::QueuedConnection);
         extracted++;
     }
 

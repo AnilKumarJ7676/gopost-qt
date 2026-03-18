@@ -327,6 +327,12 @@ Item {
     // ================================================================
     Connections {
         target: timelineNotifier
+        function onPlaybackChanged() {
+            internal.syncMediaPlayer()
+        }
+        function onTracksChanged() {
+            internal.syncMediaPlayer()
+        }
         function onStateChanged() {
             internal.syncMediaPlayer()
         }

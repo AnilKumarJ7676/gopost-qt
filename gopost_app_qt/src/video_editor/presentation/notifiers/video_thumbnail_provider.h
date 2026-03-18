@@ -14,6 +14,9 @@
 #include <QTimer>
 #include <QDir>
 #include <QObject>
+#include <QPointer>
+#include <atomic>
+#include <memory>
 #include <optional>
 
 namespace gopost::video_editor {
@@ -57,14 +60,21 @@ class BatchThumbnailResponse : public QQuickImageResponse {
     Q_OBJECT
 public:
     BatchThumbnailResponse();
+    ~BatchThumbnailResponse() override;
 
     /// Called by the batch worker when the frame is ready.
     void deliver(const QImage& img);
 
     QQuickTextureFactory* textureFactory() const override;
 
+    /// Thread-safe alive flag: shared between response and worker.
+    /// When the response is destroyed, the flag is set to false.
+    /// Workers check this before delivering to avoid use-after-free.
+    std::shared_ptr<std::atomic<bool>> aliveFlag() const { return alive_; }
+
 private:
     QImage result_;
+    std::shared_ptr<std::atomic<bool>> alive_ = std::make_shared<std::atomic<bool>>(true);
 };
 
 // ---------------------------------------------------------------------------
@@ -81,6 +91,7 @@ public:
         double timeSec;
         int height;
         BatchThumbnailResponse* response;
+        std::shared_ptr<std::atomic<bool>> alive;  // thread-safe alive check
     };
 
     explicit BatchCoordinator(ThumbnailCache* cache, QThreadPool* pool, QObject* parent = nullptr);
@@ -116,6 +127,7 @@ public:
         double timeSec;
         int height;
         BatchThumbnailResponse* response;
+        std::shared_ptr<std::atomic<bool>> alive;  // thread-safe alive check
     };
 
     BatchFileWorker(const QString& filePath, QList<Request> requests,

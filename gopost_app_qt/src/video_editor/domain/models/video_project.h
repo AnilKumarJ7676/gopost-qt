@@ -51,9 +51,65 @@ inline QString appliedBadgeShortLabel(AppliedBadge b) {
 // ── Enums ───────────────────────────────────────────────────────────────────
 
 enum class TrackType : int { Video = 0, Audio, Title, Effect, Subtitle };
-enum class ClipSourceType : int { Video = 0, Image, Title, Color, Adjustment };
+enum class ClipSourceType : int { Video = 0, Image, Title, Color, Adjustment, Audio };
+
+// ── Preset clip color palette (16 colors) ───────────────────────────────────
+
+inline constexpr int kClipColorPresetCount = 16;
+
+inline QString clipColorPresetHex(int index) {
+    static const char* kPresets[16] = {
+        "#EF5350", "#EC407A", "#AB47BC", "#7E57C2",  // Red, Pink, Purple, Deep Purple
+        "#5C6BC0", "#42A5F5", "#26C6DA", "#26A69A",  // Indigo, Blue, Cyan, Teal
+        "#66BB6A", "#9CCC65", "#D4E157", "#FFEE58",  // Green, Light Green, Lime, Yellow
+        "#FFA726", "#FF7043", "#8D6E63", "#78909C",  // Orange, Deep Orange, Brown, Blue Grey
+    };
+    if (index < 0 || index >= 16) return {};
+    return QString::fromLatin1(kPresets[index]);
+}
+
+inline QString clipColorPresetName(int index) {
+    static const char* kNames[16] = {
+        "Red", "Pink", "Purple", "Deep Purple",
+        "Indigo", "Blue", "Cyan", "Teal",
+        "Green", "Light Green", "Lime", "Yellow",
+        "Orange", "Deep Orange", "Brown", "Blue Grey",
+    };
+    if (index < 0 || index >= 16) return {};
+    return QString::fromLatin1(kNames[index]);
+}
+
+inline QString autoColorForSourceType(ClipSourceType t) {
+    switch (t) {
+        case ClipSourceType::Video:      return QStringLiteral("#42A5F5"); // Blue
+        case ClipSourceType::Image:      return QStringLiteral("#FFEE58"); // Yellow
+        case ClipSourceType::Title:      return QStringLiteral("#AB47BC"); // Purple
+        case ClipSourceType::Color:      return QStringLiteral("#66BB6A"); // Green
+        case ClipSourceType::Adjustment: return QStringLiteral("#78909C"); // Blue Grey
+        case ClipSourceType::Audio:      return QStringLiteral("#66BB6A"); // Green
+    }
+    return QStringLiteral("#78909C");
+}
 enum class ProxyStatus : int { None = 0, Generating, Ready, Failed };
 enum class MarkerType : int { Chapter = 0, Comment, Todo, Sync };
+
+// ── CrossfadeType ──────────────────────────────────────────────────────────
+
+enum class CrossfadeType : int { Crossfade = 0, DipToBlack, WipeLeft, WipeRight, WipeUp, WipeDown };
+
+// ── TimelineTransition (cross-clip transitions from overlap) ───────────────
+
+struct TimelineTransition {
+    int clipAId{0};
+    int clipBId{0};
+    double duration{0.0};
+    CrossfadeType type{CrossfadeType::Crossfade};
+
+    [[nodiscard]] QJsonObject toMap() const;
+    [[nodiscard]] static TimelineTransition fromMap(const QJsonObject& m);
+
+    bool operator==(const TimelineTransition&) const = default;
+};
 
 // ── ClipAudioSettings ───────────────────────────────────────────────────────
 
@@ -123,6 +179,7 @@ struct VideoClip {
     double sourceIn{0.0};
     double sourceOut{0.0};
     double speed{1.0};
+    bool isReversed{false};
     double opacity{1.0};
     int blendMode{0};
     int effectHash{0};
@@ -134,6 +191,9 @@ struct VideoClip {
     ClipKeyframes keyframes;
     ClipAudioSettings audio;
     std::optional<AdjustmentClipData> adjustmentData;
+    std::optional<int> linkedClipId;   // Feature 10: linked audio/video pair
+    std::optional<QString> colorTag;   // user-assigned color hex (e.g. "#EF5350"), nullopt = auto
+    QString customLabel;               // user-assigned overlay label (empty = none)
 
     [[nodiscard]] bool isAdjustmentLayer() const { return sourceType == ClipSourceType::Adjustment; }
     [[nodiscard]] double duration() const { return timelineOut - timelineIn; }
@@ -142,6 +202,7 @@ struct VideoClip {
     [[nodiscard]] bool hasColorGrading() const;
     [[nodiscard]] bool hasTransition() const;
     [[nodiscard]] bool hasSpeedChange() const;
+    [[nodiscard]] bool hasSpeedRamp() const;
     [[nodiscard]] bool hasKeyframes() const;
     [[nodiscard]] bool hasAudioMod() const;
     [[nodiscard]] bool hasProxy() const;
@@ -156,6 +217,7 @@ struct VideoClip {
         std::optional<double> sourceIn;
         std::optional<double> sourceOut;
         std::optional<double> speed;
+        std::optional<bool> isReversed;
         std::optional<double> opacity;
         std::optional<int> blendMode;
         std::optional<QString> proxyPath;
@@ -169,6 +231,11 @@ struct VideoClip {
         std::optional<ClipKeyframes> keyframes;
         std::optional<ClipAudioSettings> audio;
         std::optional<AdjustmentClipData> adjustmentData;
+        std::optional<int> linkedClipId;
+        bool clearLinkedClipId{false};
+        std::optional<QString> colorTag;
+        bool clearColorTag{false};
+        std::optional<QString> customLabel;
     };
 
     [[nodiscard]] VideoClip copyWith(const CopyWithOpts& opts) const;
@@ -191,6 +258,7 @@ struct VideoTrack {
     bool isSolo{false};
     QList<VideoClip> clips;
     TrackAudioSettings audioSettings;
+    std::optional<QString> color;   // user-assigned track color hex, nullopt = default
 
     struct CopyWithOpts {
         std::optional<QString> label;
@@ -200,6 +268,8 @@ struct VideoTrack {
         std::optional<bool> isSolo;
         std::optional<QList<VideoClip>> clips;
         std::optional<TrackAudioSettings> audioSettings;
+        std::optional<QString> color;
+        bool clearColor{false};
     };
 
     [[nodiscard]] VideoTrack copyWith(const CopyWithOpts& opts) const;
@@ -216,6 +286,25 @@ struct TimelineMarker {
     MarkerType type{MarkerType::Chapter};
     QString label;
     std::optional<QString> color;
+    QString notes;                          // optional notes/description
+    std::optional<double> endPositionSeconds; // if set, marker is a region (span)
+    std::optional<int> clipId;              // if set, marker is attached to a clip
+
+    [[nodiscard]] bool isRegion() const { return endPositionSeconds.has_value(); }
+    [[nodiscard]] bool isClipMarker() const { return clipId.has_value(); }
+    [[nodiscard]] double regionDuration() const {
+        return isRegion() ? *endPositionSeconds - positionSeconds : 0.0;
+    }
+
+    [[nodiscard]] static QString defaultColorForType(MarkerType t) {
+        switch (t) {
+            case MarkerType::Chapter: return QStringLiteral("#4CAF50");
+            case MarkerType::Comment: return QStringLiteral("#2196F3");
+            case MarkerType::Todo:    return QStringLiteral("#FF9800");
+            case MarkerType::Sync:    return QStringLiteral("#E91E63");
+        }
+        return QStringLiteral("#9E9E9E");
+    }
 
     [[nodiscard]] QJsonObject toMap() const;
     [[nodiscard]] static TimelineMarker fromMap(const QJsonObject& m);
@@ -230,6 +319,7 @@ struct VideoProject {
     int height{1080};
     QList<VideoTrack> tracks;
     QList<TimelineMarker> markers;
+    QList<TimelineTransition> transitions;  // Feature 9: cross-clip crossfade transitions
 
     [[nodiscard]] double duration() const;
     [[nodiscard]] QList<VideoClip> allClips() const;
@@ -240,6 +330,7 @@ struct VideoProject {
         std::optional<int> height;
         std::optional<QList<VideoTrack>> tracks;
         std::optional<QList<TimelineMarker>> markers;
+        std::optional<QList<TimelineTransition>> transitions;
     };
 
     [[nodiscard]] VideoProject copyWith(const CopyWithOpts& opts) const;

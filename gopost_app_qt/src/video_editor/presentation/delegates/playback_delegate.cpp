@@ -1,5 +1,6 @@
 #include "video_editor/presentation/delegates/playback_delegate.h"
 
+#include <QDebug>
 #include <algorithm>
 #include <cmath>
 
@@ -10,24 +11,54 @@ namespace gopost::video_editor {
 // ---------------------------------------------------------------------------
 
 PlaybackDelegate::PlaybackDelegate(TimelineOperations* ops)
-    : ops_(ops) {}
+    : ops_(ops)
+    , lastTickTime_(std::chrono::steady_clock::now()) {}
 
 PlaybackDelegate::~PlaybackDelegate() = default;
 
 // ---------------------------------------------------------------------------
-// Playback
+// State queries
+// ---------------------------------------------------------------------------
+
+double PlaybackDelegate::playbackRate() const {
+    if (shuttleSpeed_ == 0) return 1.0;
+    return std::pow(2.0, std::abs(shuttleSpeed_) - 1)
+           * (shuttleSpeed_ > 0 ? 1.0 : -1.0);
+}
+
+double PlaybackDelegate::getProgress() const {
+    const double dur = getDuration();
+    if (dur <= 0.0) return 0.0;
+    return ops_->currentState().playback.positionSeconds / dur;
+}
+
+double PlaybackDelegate::getDuration() const {
+    const auto& state = ops_->currentState();
+    return state.project ? state.project->duration() : 0.0;
+}
+
+// ---------------------------------------------------------------------------
+// Playback — play / pause / toggle
 // ---------------------------------------------------------------------------
 
 void PlaybackDelegate::play() {
     auto state = ops_->currentState();
     if (state.playback.isPlaying) return;
+
+    status_ = PlaybackStatus::Playing;
     state.playback.isPlaying = true;
+
+    // Record lastTickTime so the first tick computes a correct delta
+    lastTickTime_ = std::chrono::steady_clock::now();
+
     ops_->setState(std::move(state));
 }
 
 void PlaybackDelegate::pause() {
     auto state = ops_->currentState();
     if (!state.playback.isPlaying) return;
+
+    status_ = PlaybackStatus::Paused;
     state.playback.isPlaying = false;
     shuttleSpeed_ = 0;
     ops_->setState(std::move(state));
@@ -39,13 +70,36 @@ void PlaybackDelegate::togglePlayPause() {
     else play();
 }
 
+// ---------------------------------------------------------------------------
+// Seek — with explicit SEEKING state
+// ---------------------------------------------------------------------------
+
 void PlaybackDelegate::seek(double positionSeconds) {
     auto state = ops_->currentState();
+
+    // Remember if we were playing so we can resume after seek
+    wasPlayingBeforeSeek_ = state.playback.isPlaying;
+
+    // Transition to SEEKING state
+    status_ = PlaybackStatus::Seeking;
+
     const double duration = state.project ? state.project->duration() : 0.0;
     state.playback.positionSeconds = std::clamp(positionSeconds, 0.0, duration);
     ops_->setState(std::move(state));
+
+    // Seek the decode thread via the engine
     ops_->updateActiveVideo();
+
+    // Render the frame at the new position
     ops_->renderCurrentFrame();
+
+    // Restore previous state: resume PLAYING if was playing, else PAUSED
+    if (wasPlayingBeforeSeek_) {
+        status_ = PlaybackStatus::Playing;
+        lastTickTime_ = std::chrono::steady_clock::now();
+    } else {
+        status_ = PlaybackStatus::Paused;
+    }
 }
 
 void PlaybackDelegate::stepForward() {
@@ -168,6 +222,22 @@ double PlaybackDelegate::snapPosition(double rawPos) const {
             }
         }
     }
+
+    // Snap to markers
+    for (const auto& marker : project->markers) {
+        const double dist = std::abs(rawPos - marker.positionSeconds);
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = marker.positionSeconds;
+        }
+        if (marker.endPositionSeconds.has_value()) {
+            const double distEnd = std::abs(rawPos - *marker.endPositionSeconds);
+            if (distEnd < bestDist) {
+                bestDist = distEnd;
+                best = *marker.endPositionSeconds;
+            }
+        }
+    }
     return best;
 }
 
@@ -184,13 +254,22 @@ void PlaybackDelegate::jumpToPreviousSnapPoint() {
     double bestPos = 0.0;
     constexpr double kEpsilon = 0.001;
 
-    // Collect all clip edges and find the closest one before current position
     for (const auto& track : project->tracks) {
         for (const auto& clip : track.clips) {
             if (clip.timelineIn < current - kEpsilon && clip.timelineIn > bestPos)
                 bestPos = clip.timelineIn;
             if (clip.timelineOut < current - kEpsilon && clip.timelineOut > bestPos)
                 bestPos = clip.timelineOut;
+        }
+    }
+    // Include markers
+    for (const auto& marker : project->markers) {
+        if (marker.positionSeconds < current - kEpsilon && marker.positionSeconds > bestPos)
+            bestPos = marker.positionSeconds;
+        if (marker.endPositionSeconds.has_value()) {
+            double ep = *marker.endPositionSeconds;
+            if (ep < current - kEpsilon && ep > bestPos)
+                bestPos = ep;
         }
     }
     seek(bestPos);
@@ -212,6 +291,16 @@ void PlaybackDelegate::jumpToNextSnapPoint() {
                 bestPos = clip.timelineIn;
             if (clip.timelineOut > current + kEpsilon && clip.timelineOut < bestPos)
                 bestPos = clip.timelineOut;
+        }
+    }
+    // Include markers
+    for (const auto& marker : project->markers) {
+        if (marker.positionSeconds > current + kEpsilon && marker.positionSeconds < bestPos)
+            bestPos = marker.positionSeconds;
+        if (marker.endPositionSeconds.has_value()) {
+            double ep = *marker.endPositionSeconds;
+            if (ep > current + kEpsilon && ep < bestPos)
+                bestPos = ep;
         }
     }
     seek(bestPos);
@@ -271,35 +360,72 @@ void PlaybackDelegate::executeRender() {
 }
 
 // ---------------------------------------------------------------------------
-// Playback tick (called at ~33 ms intervals by the owning notifier's timer)
+// Playback tick — called at ~33ms intervals by the owning notifier's timer
+//
+// Uses real elapsed time (steady_clock) for frame-accurate playback.
+// This compensates for timer jitter: if a tick fires at 40ms instead of
+// 33ms, the position advances by the correct 40ms * playbackRate.
 // ---------------------------------------------------------------------------
 
 void PlaybackDelegate::onPlaybackTick() {
     auto state = ops_->currentState();
     if (!state.playback.isPlaying) return;
 
-    constexpr double kTickSec = kPlaybackTickMs / 1000.0;
-    const double speedMul = (shuttleSpeed_ != 0) ? std::pow(2.0, std::abs(shuttleSpeed_) - 1)
-                                                    * (shuttleSpeed_ > 0 ? 1.0 : -1.0)
-                                                  : 1.0;
-    double newPos = state.playback.positionSeconds + kTickSec * speedMul;
+    // Compute real elapsed time since last tick
+    auto now = std::chrono::steady_clock::now();
+    double elapsedSec = std::chrono::duration<double>(now - lastTickTime_).count();
+    lastTickTime_ = now;
+
+    // Clamp elapsed to avoid huge jumps (e.g., after debugger pause or system sleep)
+    elapsedSec = std::clamp(elapsedSec, 0.0, 0.25);
+
+    // Apply playback rate (includes shuttle speed and active clip speed)
+    double rate = playbackRate();
+
+    // Factor in the active clip's speed at the current position
+    if (state.project && rate > 0.0) {
+        double pos = state.playback.positionSeconds;
+        for (const auto& track : state.project->tracks) {
+            for (const auto& clip : track.clips) {
+                if ((clip.sourceType == ClipSourceType::Video ||
+                     clip.sourceType == ClipSourceType::Image) &&
+                    pos >= clip.timelineIn - 0.001 && pos < clip.timelineOut + 0.001) {
+                    // Check for speed ramp keyframes first
+                    const auto* speedTrack = clip.keyframes.trackFor(KeyframeProperty::Speed);
+                    if (speedTrack && speedTrack->keyframes.size() >= 2) {
+                        double relTime = pos - clip.timelineIn;
+                        double evaluated = speedTrack->evaluate(relTime);
+                        rate *= std::max(0.1, evaluated);
+                    } else if (std::abs(clip.speed) > 0.01 && std::abs(clip.speed - 1.0) > 0.01) {
+                        rate *= std::abs(clip.speed);
+                    }
+                    goto done_speed;  // found active clip, stop searching
+                }
+            }
+        }
+        done_speed:;
+    }
+
+    double newPos = state.playback.positionSeconds + elapsedSec * rate;
+
+    // Clamp to timeline bounds
     const double duration = state.project ? state.project->duration() : 0.0;
     const double outPt = state.playback.outPoint.value_or(duration);
 
     if (newPos >= outPt) {
-        // Stop at end — don't loop. User can press play again to restart.
         newPos = outPt;
         state.playback.isPlaying = false;
+        status_ = PlaybackStatus::Stopped;
     } else if (newPos < 0.0) {
         newPos = 0.0;
         state.playback.isPlaying = false;
+        status_ = PlaybackStatus::Stopped;
     }
 
     state.playback.positionSeconds = newPos;
     ops_->setState(std::move(state));
-    ops_->updateActiveVideo();
-    // Use throttled render during playback to avoid redundant stateChanged emissions.
-    // setState() above already emits stateChanged for QML updates.
+    // throttledRenderFrame() calls renderCurrentFrame() which already
+    // seeks the engine — no need for a separate updateActiveVideo() call.
     ops_->throttledRenderFrame();
 }
 

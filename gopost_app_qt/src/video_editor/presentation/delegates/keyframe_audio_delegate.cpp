@@ -123,11 +123,16 @@ void KeyframeAudioDelegate::setClipFadeOut(int clipId, double seconds) {
 }
 
 void KeyframeAudioDelegate::setClipMuted(int clipId, bool muted) {
+    auto state = ops_->currentState();
+    if (!state.project) return;
+    auto before = *state.project;
+
     ops_->updateClip(clipId, [muted](const VideoClip& c) {
         VideoClip u = c;
         u.audio.isMuted = muted;
         return u;
     });
+    ops_->pushUndo(before);
     syncAudioToEngine(clipId);
 }
 
@@ -141,6 +146,7 @@ void KeyframeAudioDelegate::setTrackVolume(int trackIndex, double volume) {
     auto& tracks = state.project->tracks;
     if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size())) return;
     tracks[trackIndex].audioSettings.volume = std::clamp(volume, 0.0, 2.0);
+    state.trackGeneration++;
     ops_->setState(std::move(state));
 }
 
@@ -150,6 +156,7 @@ void KeyframeAudioDelegate::setTrackPan(int trackIndex, double pan) {
     auto& tracks = state.project->tracks;
     if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size())) return;
     tracks[trackIndex].audioSettings.pan = std::clamp(pan, -1.0, 1.0);
+    state.trackGeneration++;
     ops_->setState(std::move(state));
 }
 
