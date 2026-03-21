@@ -17,11 +17,108 @@ import QtQuick.Dialogs
  *
  * Cross-platform: uses Qt FileDialog (native on Win/Mac/Linux).
  */
-Item {
+FocusScope {
     id: root
+    focus: true
 
     property bool isGridView: true
     property bool isDragOver: false
+    property real thumbWidth: 120  // thumbnail width (resizable 80–240)
+
+    // Keyboard shortcuts for media pool (Shortcut works regardless of focus)
+    Shortcut {
+        sequence: "Ctrl+A"
+        enabled: root.visible && mediaPoolNotifier !== null
+        onActivated: mediaPoolNotifier.selectAllInBin()
+    }
+    Shortcut {
+        sequence: "Delete"
+        enabled: root.visible && mediaPoolNotifier !== null && mediaPoolNotifier.selectedAssetCount > 0
+        onActivated: {
+            var ids = mediaPoolNotifier.selectedAssetIds
+            for (var i = 0; i < ids.length; i++)
+                mediaPoolNotifier.removeAsset(ids[i])
+        }
+    }
+    Shortcut {
+        sequence: "F2"
+        enabled: root.visible && mediaPoolNotifier !== null && mediaPoolNotifier.selectedAssetCount === 1
+        onActivated: renameDialog.open()
+    }
+    Shortcut {
+        sequence: "Return"
+        enabled: root.visible && mediaPoolNotifier !== null && mediaPoolNotifier.selectedAssetCount > 0
+        onActivated: {
+            var selIds = mediaPoolNotifier.selectedAssetIds
+            var assets = mediaPoolNotifier.filteredAssets
+            for (var j = 0; j < assets.length; j++) {
+                if (assets[j].id === selIds[0]) {
+                    internal.addAssetToTimeline(assets[j])
+                    break
+                }
+            }
+        }
+    }
+
+    // ---- Drag proxy — parented to window overlay so it floats above all panels ----
+    Item {
+        id: dragProxy
+        parent: Overlay.overlay
+        visible: false
+        width: 120; height: 80
+        z: 999999
+        opacity: 0.92
+
+        property var assetData: ({})
+        property string mediaType: ""
+        property string displayName: ""
+        property int dragCount: 1
+
+        Drag.hotSpot: Qt.point(width / 2, height / 2)
+        Drag.keys: ["application/x-gopost-media"]
+
+        Rectangle {
+            anchors.fill: parent; radius: 6
+            color: "#2A2A50"
+            border.color: "#6C63FF"; border.width: 1.5
+
+            ColumnLayout {
+                anchors.fill: parent; anchors.margins: 4; spacing: 2
+
+                Rectangle {
+                    Layout.fillWidth: true; Layout.fillHeight: true
+                    radius: 4; color: "#0E0E1C"
+                    Label {
+                        anchors.centerIn: parent
+                        text: dragProxy.mediaType === "video" ? "\uD83C\uDFA5"
+                            : dragProxy.mediaType === "audio" ? "\uD83C\uDFB5" : "\uD83D\uDDBC"
+                        font.pixelSize: 18; color: "#8888B0"
+                    }
+                }
+                Label {
+                    text: dragProxy.displayName
+                    font.pixelSize: 9; color: "#D0D0E8"
+                    elide: Text.ElideMiddle
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                }
+            }
+            // Badge showing count when dragging multiple items
+            Rectangle {
+                visible: dragProxy.dragCount > 1
+                anchors.top: parent.top; anchors.right: parent.right
+                anchors.topMargin: -6; anchors.rightMargin: -6
+                width: 22; height: 22; radius: 11
+                color: "#6C63FF"
+                Label {
+                    anchors.centerIn: parent
+                    text: dragProxy.dragCount
+                    font.pixelSize: 11; font.weight: Font.Bold
+                    color: "#FFFFFF"
+                }
+            }
+        }
+    }
 
     // ---- File dialog ----
     FileDialog {
@@ -59,6 +156,14 @@ Item {
         console.log("[VE2MediaPool] created — mediaPoolNotifier:",
                     mediaPoolNotifier !== null,
                     "assets:", mediaPoolNotifier ? mediaPoolNotifier.assetCount : 0)
+    }
+
+    // Grab focus when clicking anywhere in the media pool panel
+    MouseArea {
+        anchors.fill: parent
+        acceptedButtons: Qt.LeftButton
+        propagateComposedEvents: true
+        onPressed: mouse => { root.forceActiveFocus(); mouse.accepted = false }
     }
 
     ColumnLayout {
@@ -196,6 +301,71 @@ Item {
             }
         }
 
+        // ---- Breadcrumb + Bin bar ----
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: mediaPoolNotifier && (mediaPoolNotifier.activeBinId !== "" || mediaPoolNotifier.bins.length > 0) ? 28 : 0
+            visible: height > 0
+            color: "#0E0E1C"
+            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: "#252540" }
+
+            RowLayout {
+                anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 4
+
+                // Back button
+                Label {
+                    visible: mediaPoolNotifier && mediaPoolNotifier.activeBinId !== ""
+                    text: "\u2190"; font.pixelSize: 14; color: "#8888A0"
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: { if (mediaPoolNotifier) mediaPoolNotifier.navigateUp() } }
+                }
+
+                // Breadcrumb path
+                Label {
+                    text: mediaPoolNotifier ? mediaPoolNotifier.binBreadcrumb : "All Media"
+                    font.pixelSize: 10; color: "#6B6B88"
+                    elide: Text.ElideMiddle; Layout.fillWidth: true
+                }
+
+                // New bin button
+                Rectangle {
+                    width: newBinLbl.implicitWidth + 10; height: 20; radius: 4
+                    color: newBinHov.hovered ? Qt.rgba(1,1,1,0.06) : "transparent"
+                    Label { id: newBinLbl; anchors.centerIn: parent; text: "+ Bin"; font.pixelSize: 9; color: "#6B6B88" }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: newBinDialog.open() }
+                    HoverHandler { id: newBinHov }
+                }
+            }
+        }
+
+        // ---- Bins in current level ----
+        Flow {
+            Layout.fillWidth: true
+            Layout.preferredHeight: mediaPoolNotifier && mediaPoolNotifier.bins.length > 0 ? implicitHeight : 0
+            visible: mediaPoolNotifier && mediaPoolNotifier.bins.length > 0
+            Layout.leftMargin: 8; Layout.rightMargin: 8; Layout.topMargin: 4
+            spacing: 4
+
+            Repeater {
+                model: mediaPoolNotifier ? mediaPoolNotifier.bins : []
+                delegate: Rectangle {
+                    width: binItemLbl.implicitWidth + 28; height: 24; radius: 4
+                    color: binItemHov.hovered ? Qt.rgba(0.424, 0.388, 1.0, 0.12) : "#1A1A34"
+                    border.color: "#303050"
+
+                    RowLayout {
+                        anchors.centerIn: parent; spacing: 3
+                        Label { text: "\uD83D\uDCC1"; font.pixelSize: 10 }
+                        Label { id: binItemLbl; text: modelData.name || "Bin"; font.pixelSize: 10; color: "#D0D0E8" }
+                    }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onDoubleClicked: { if (mediaPoolNotifier) mediaPoolNotifier.navigateIntoBin(modelData.id) } }
+                    HoverHandler { id: binItemHov }
+                }
+            }
+        }
+
         // ---- Content area ----
         Item {
             Layout.fillWidth: true
@@ -244,14 +414,73 @@ Item {
                 Label { text: "Drop files or click Import"; font.pixelSize: 11; color: "#505070"; Layout.alignment: Qt.AlignHCenter }
             }
 
+            // ---- Marquee drag-select overlay (sits above grid/list, behind item controls) ----
+            MouseArea {
+                id: marqueeArea
+                anchors.fill: parent; anchors.margins: 6
+                visible: !root.isDragOver
+                z: 0  // below grid item z but catches clicks on empty space
+                acceptedButtons: Qt.LeftButton
+                propagateComposedEvents: true
+
+                property bool isMarquee: false
+                property point marqueeStart: Qt.point(0, 0)
+                property point marqueeCurrent: Qt.point(0, 0)
+                property var startSelectedIds: []  // IDs selected before marquee started
+
+                onPressed: mouse => {
+                    // Only start marquee if clicking empty space (not on an item)
+                    // Items have z > 0 so they get the press first; if we get it, it's empty space
+                    isMarquee = false
+                    marqueeStart = Qt.point(mouse.x, mouse.y)
+                    marqueeCurrent = Qt.point(mouse.x, mouse.y)
+
+                    // If no modifier, deselect all on empty-space click
+                    if (!(mouse.modifiers & Qt.ControlModifier) && !(mouse.modifiers & Qt.ShiftModifier)) {
+                        if (mediaPoolNotifier) mediaPoolNotifier.deselectAll()
+                    }
+                    startSelectedIds = mediaPoolNotifier ? mediaPoolNotifier.selectedAssetIds : []
+                }
+                onPositionChanged: mouse => {
+                    if (!pressed) return
+                    marqueeCurrent = Qt.point(mouse.x, mouse.y)
+                    var dx = marqueeCurrent.x - marqueeStart.x
+                    var dy = marqueeCurrent.y - marqueeStart.y
+                    if (!isMarquee && (dx*dx + dy*dy > 36)) {
+                        isMarquee = true
+                    }
+                    if (isMarquee) {
+                        internal.marqueeSelect(marqueeStart, marqueeCurrent, startSelectedIds)
+                    }
+                }
+                onReleased: {
+                    isMarquee = false
+                    marqueeRect.visible = false
+                }
+
+                // Marquee rectangle visual
+                Rectangle {
+                    id: marqueeRect
+                    visible: marqueeArea.isMarquee
+                    color: Qt.rgba(0.424, 0.388, 1.0, 0.15)
+                    border.color: "#6C63FF"; border.width: 1; radius: 2
+                    x: Math.min(marqueeArea.marqueeStart.x, marqueeArea.marqueeCurrent.x)
+                    y: Math.min(marqueeArea.marqueeStart.y, marqueeArea.marqueeCurrent.y)
+                    width: Math.abs(marqueeArea.marqueeCurrent.x - marqueeArea.marqueeStart.x)
+                    height: Math.abs(marqueeArea.marqueeCurrent.y - marqueeArea.marqueeStart.y)
+                    z: 100
+                }
+            }
+
             // ---- Grid View ----
             GridView {
                 id: gridView
                 anchors.fill: parent; anchors.margins: 6
                 visible: root.isGridView && !root.isDragOver
                 clip: true
-                cellWidth: Math.max(80, (width - 6) / 2)
-                cellHeight: cellWidth * 0.7 + 26
+                z: 1  // above marquee area so items get press events first
+                cellWidth: Math.max(80, Math.min(root.thumbWidth + 8, (width - 6) / Math.max(1, Math.floor((width - 6) / (root.thumbWidth + 8)))))
+                cellHeight: cellWidth * 0.625 + 28
 
                 model: mediaPoolNotifier ? mediaPoolNotifier.filteredAssets : []
 
@@ -260,34 +489,136 @@ Item {
                     height: GridView.view.cellHeight - 4
 
                     readonly property var asset: modelData || ({})
+                    // Bind selection to selectionGeneration so it re-evaluates without model rebuild
+                    readonly property bool isItemSelected: {
+                        void(mediaPoolNotifier ? mediaPoolNotifier.selectionGeneration : 0)
+                        return mediaPoolNotifier ? mediaPoolNotifier.isAssetSelected(asset.id) : false
+                    }
 
                     Rectangle {
                         anchors.fill: parent; radius: 6
-                        color: asset.isSelected ? Qt.rgba(0.424, 0.388, 1.0, 0.12) : "#1A1A34"
-                        border.color: asset.isSelected ? "#6C63FF" : "#303050"
+                        color: isItemSelected ? Qt.rgba(0.424, 0.388, 1.0, 0.12) : "#1A1A34"
+                        border.color: isItemSelected ? "#6C63FF" : "#303050"
 
                         ColumnLayout {
                             anchors.fill: parent; anchors.margins: 3; spacing: 2
 
-                            // Thumbnail
+                            // Thumbnail with hover-scrub preview
                             Rectangle {
+                                id: thumbRect
                                 Layout.fillWidth: true; Layout.fillHeight: true
-                                radius: 4; color: "#0E0E1C"
+                                radius: 4; color: "#0E0E1C"; clip: true
 
+                                property bool isVideo: asset.mediaType === "video"
+                                property bool isScrubbing: isVideo && scrubArea.containsMouse
+                                property double scrubTime: 0.0
+                                property string thumbBase64: isVideo && asset.filePath
+                                                            ? Qt.btoa(asset.filePath) : ""
+
+                                // Poster frame for videos (shown when not hovering)
+                                Image {
+                                    id: posterImage
+                                    anchors.fill: parent
+                                    visible: thumbRect.isVideo && !thumbRect.isScrubbing
+                                    fillMode: Image.PreserveAspectFit
+                                    asynchronous: true
+                                    cache: true
+                                    source: thumbRect.thumbBase64 !== ""
+                                            ? "image://videothumbnail/" + thumbRect.thumbBase64
+                                              + "@0@" + Math.round(parent.height)
+                                            : ""
+                                }
+
+                                // Scrub frame for videos (shown during hover)
+                                Image {
+                                    id: scrubImage
+                                    anchors.fill: parent
+                                    visible: thumbRect.isScrubbing
+                                    fillMode: Image.PreserveAspectFit
+                                    asynchronous: true
+                                    cache: true
+                                    source: thumbRect.isScrubbing && thumbRect.thumbBase64 !== ""
+                                            ? "image://videothumbnail/" + thumbRect.thumbBase64
+                                              + "@" + thumbRect.scrubTime.toFixed(1)
+                                              + "@" + Math.round(parent.height)
+                                            : ""
+                                }
+
+                                // Fallback icon (non-video, or while loading)
                                 Label {
                                     anchors.centerIn: parent
+                                    visible: !thumbRect.isVideo
+                                             || (posterImage.status !== Image.Ready
+                                                 && !thumbRect.isScrubbing)
                                     text: asset.mediaType === "video" ? "\uD83C\uDFA5"
                                         : asset.mediaType === "audio" ? "\uD83C\uDFB5" : "\uD83D\uDDBC"
                                     font.pixelSize: 20; color: "#505068"
+                                }
+
+                                // Hover-scrub mouse area
+                                MouseArea {
+                                    id: scrubArea
+                                    anchors.fill: parent
+                                    hoverEnabled: thumbRect.isVideo
+                                    acceptedButtons: Qt.NoButton
+                                    z: 2
+
+                                    onPositionChanged: mouse => {
+                                        if (!containsMouse || !thumbRect.isVideo) return
+                                        var dur = asset.duration || 0
+                                        if (dur <= 0) return
+                                        var ratio = Math.max(0, Math.min(1, mouse.x / width))
+                                        // Quantize to 0.5s steps to limit unique requests
+                                        var raw = ratio * dur
+                                        thumbRect.scrubTime = Math.round(raw * 2) / 2
+                                    }
+                                    onExited: thumbRect.scrubTime = 0
+                                }
+
+                                // Scrub progress bar
+                                Rectangle {
+                                    anchors.left: parent.left; anchors.right: parent.right
+                                    anchors.bottom: parent.bottom
+                                    height: 3; color: Qt.rgba(0, 0, 0, 0.5)
+                                    visible: thumbRect.isScrubbing
+                                    z: 3
+
+                                    Rectangle {
+                                        width: {
+                                            var dur = asset.duration || 1
+                                            return parent.width * Math.min(1, thumbRect.scrubTime / dur)
+                                        }
+                                        height: parent.height
+                                        color: "#6C63FF"
+                                    }
+                                }
+
+                                // Timecode overlay
+                                Rectangle {
+                                    anchors.top: parent.top; anchors.left: parent.left
+                                    anchors.margins: 3
+                                    visible: thumbRect.isScrubbing
+                                    width: tcLabel.implicitWidth + 6; height: 14; radius: 3
+                                    color: Qt.rgba(0, 0, 0, 0.8)
+                                    z: 4
+
+                                    Label {
+                                        id: tcLabel; anchors.centerIn: parent
+                                        text: internal.formatTimecode(thumbRect.scrubTime)
+                                        font.pixelSize: 8; font.family: "monospace"
+                                        color: "#E0E0F0"
+                                    }
                                 }
 
                                 // Duration badge
                                 Rectangle {
                                     anchors.bottom: parent.bottom; anchors.right: parent.right
                                     anchors.margins: 3
-                                    visible: asset.duration !== undefined && asset.duration > 0
+                                    visible: !thumbRect.isScrubbing
+                                             && asset.duration !== undefined && asset.duration > 0
                                     width: durText.implicitWidth + 6; height: 14; radius: 3
                                     color: Qt.rgba(0, 0, 0, 0.75)
+                                    z: 4
 
                                     Label {
                                         id: durText; anchors.centerIn: parent
@@ -333,44 +664,85 @@ Item {
                             ToolTip.text: "Add to timeline"
                         }
 
-                        // Click / double-click / drag
+                        // Click / double-click / drag-to-timeline
                         MouseArea {
                             id: gridDragArea
                             anchors.fill: parent; z: -1
                             cursorShape: Qt.PointingHandCursor
-                            drag.target: dragItem
+                            preventStealing: true
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
 
-                            onClicked: {
-                                if (mediaPoolNotifier && asset.id)
-                                    mediaPoolNotifier.selectAsset(asset.id)
-                            }
-                            onDoubleClicked: internal.addAssetToTimeline(asset)
-                        }
-                    }
+                            property point pressPos
+                            property bool isDragging: false
+                            property int pressModifiers: 0
+                            property bool deferredSelect: false  // true = do single-select on release
 
-                    // Drag handle — provides data for timeline DropArea
-                    Item {
-                        id: dragItem
-                        Drag.active: gridDragArea.drag.active
-                        Drag.hotSpot: Qt.point(width / 2, height / 2)
-                        Drag.mimeData: ({
-                            "text/plain": JSON.stringify({
-                                type: "media",
-                                assetId: asset.id || "",
-                                mediaType: asset.mediaType || "video",
-                                displayName: asset.displayName || "Untitled",
-                                sourcePath: asset.filePath || "",
-                                duration: asset.duration || 5.0
-                            })
-                        })
-                        Drag.keys: ["application/x-gopost-media"]
+                            onPressed: mouse => {
+                                pressPos = Qt.point(mouse.x, mouse.y)
+                                isDragging = false
+                                deferredSelect = false
+                                pressModifiers = mouse.modifiers
 
-                        Connections {
-                            target: dragItem.Drag
-                            function onActiveChanged() {
-                                if (dragItem.Drag.active) {
-                                    console.log("[VE2MediaPool] drag started:", asset.displayName)
+                                // Select on press for immediate visual feedback
+                                if (mouse.button === Qt.LeftButton && mediaPoolNotifier && asset.id) {
+                                    if (pressModifiers & Qt.ControlModifier) {
+                                        mediaPoolNotifier.toggleAssetSelection(asset.id)
+                                    } else if (pressModifiers & Qt.ShiftModifier) {
+                                        mediaPoolNotifier.rangeSelectAsset(asset.id)
+                                    } else if (mediaPoolNotifier.isAssetSelected(asset.id)
+                                               && mediaPoolNotifier.selectedAssetCount > 1) {
+                                        // Already selected in a multi-selection — don't clear yet.
+                                        // If user releases without dragging, we single-select then.
+                                        deferredSelect = true
+                                    } else {
+                                        mediaPoolNotifier.selectAsset(asset.id)
+                                    }
                                 }
+                            }
+                            onPositionChanged: mouse => {
+                                if (!pressed) return
+                                if (!isDragging) {
+                                    var dx = mouse.x - pressPos.x
+                                    var dy = mouse.y - pressPos.y
+                                    if (dx*dx + dy*dy > 64) {
+                                        isDragging = true
+                                        deferredSelect = false
+                                        internal.beginDrag(asset)
+                                    }
+                                }
+                                if (isDragging) {
+                                    var gp = mapToItem(dragProxy.parent, mouse.x, mouse.y)
+                                    dragProxy.x = gp.x - dragProxy.width / 2
+                                    dragProxy.y = gp.y - dragProxy.height / 2
+                                }
+                            }
+                            onReleased: mouse => {
+                                if (isDragging) {
+                                    dragProxy.Drag.drop()
+                                    internal.endDrag()
+                                    isDragging = false
+                                    return
+                                }
+                                // Deferred single-select: user clicked a multi-selected item
+                                // without dragging, so narrow selection to just this item
+                                if (deferredSelect && mediaPoolNotifier && asset.id) {
+                                    mediaPoolNotifier.selectAsset(asset.id)
+                                    deferredSelect = false
+                                }
+                                if (mouse.button === Qt.RightButton) {
+                                    if (mediaPoolNotifier && asset.id) {
+                                        if (!mediaPoolNotifier.isAssetSelected(asset.id))
+                                            mediaPoolNotifier.selectAsset(asset.id)
+                                        poolContextMenu._targetAssetId = asset.id
+                                        poolContextMenu._targetAssetName = asset.displayName || ""
+                                        poolContextMenu.popup()
+                                    }
+                                    return
+                                }
+                            }
+                            onDoubleClicked: {
+                                if (!isDragging)
+                                    internal.addAssetToTimeline(asset)
                             }
                         }
                     }
@@ -383,6 +755,7 @@ Item {
                 anchors.fill: parent; anchors.margins: 4
                 visible: !root.isGridView && !root.isDragOver
                 clip: true; spacing: 2
+                z: 1
 
                 model: mediaPoolNotifier ? mediaPoolNotifier.filteredAssets : []
 
@@ -390,8 +763,14 @@ Item {
                     width: ListView.view.width; height: 38; radius: 4
 
                     readonly property var asset: modelData || ({})
+                    readonly property bool isItemSelected: {
+                        void(mediaPoolNotifier ? mediaPoolNotifier.selectionGeneration : 0)
+                        return mediaPoolNotifier ? mediaPoolNotifier.isAssetSelected(asset.id) : false
+                    }
 
-                    color: asset.isSelected ? Qt.rgba(0.424, 0.388, 1.0, 0.08) : "transparent"
+                    color: isItemSelected ? Qt.rgba(0.424, 0.388, 1.0, 0.12) : "transparent"
+                    border.color: isItemSelected ? "#6C63FF" : "transparent"
+                    border.width: isItemSelected ? 1 : 0
 
                     RowLayout {
                         anchors.fill: parent; anchors.leftMargin: 6; anchors.rightMargin: 6; spacing: 6
@@ -436,52 +815,110 @@ Item {
                         }
                     }
 
-                    // Click / double-click for list items
+                    // Click / double-click / drag for list items
                     MouseArea {
                         id: listDragArea
                         anchors.fill: parent; z: -1
                         cursorShape: Qt.PointingHandCursor
-                        drag.target: listDragItem
+                        preventStealing: true
+                        acceptedButtons: Qt.LeftButton
 
-                        onClicked: {
-                            if (mediaPoolNotifier && asset.id)
-                                mediaPoolNotifier.selectAsset(asset.id)
+                        property point pressPos
+                        property bool isDragging: false
+                        property int pressModifiers: 0
+                        property bool deferredSelect: false
+
+                        onPressed: mouse => {
+                            pressPos = Qt.point(mouse.x, mouse.y)
+                            isDragging = false
+                            deferredSelect = false
+                            pressModifiers = mouse.modifiers
+
+                            if (mediaPoolNotifier && asset.id) {
+                                if (pressModifiers & Qt.ControlModifier) {
+                                    mediaPoolNotifier.toggleAssetSelection(asset.id)
+                                } else if (pressModifiers & Qt.ShiftModifier) {
+                                    mediaPoolNotifier.rangeSelectAsset(asset.id)
+                                } else if (mediaPoolNotifier.isAssetSelected(asset.id)
+                                           && mediaPoolNotifier.selectedAssetCount > 1) {
+                                    deferredSelect = true
+                                } else {
+                                    mediaPoolNotifier.selectAsset(asset.id)
+                                }
+                            }
                         }
-                        onDoubleClicked: internal.addAssetToTimeline(asset)
-                    }
-
-                    // Drag handle for list items
-                    Item {
-                        id: listDragItem
-                        Drag.active: listDragArea.drag.active
-                        Drag.hotSpot: Qt.point(width / 2, height / 2)
-                        Drag.mimeData: ({
-                            "text/plain": JSON.stringify({
-                                type: "media",
-                                assetId: asset.id || "",
-                                mediaType: asset.mediaType || "video",
-                                displayName: asset.displayName || "Untitled",
-                                sourcePath: asset.filePath || "",
-                                duration: asset.duration || 5.0
-                            })
-                        })
-                        Drag.keys: ["application/x-gopost-media"]
+                        onPositionChanged: mouse => {
+                            if (!pressed) return
+                            if (!isDragging) {
+                                var dx = mouse.x - pressPos.x
+                                var dy = mouse.y - pressPos.y
+                                if (dx*dx + dy*dy > 64) {
+                                    isDragging = true
+                                    deferredSelect = false
+                                    internal.beginDrag(asset)
+                                }
+                            }
+                            if (isDragging) {
+                                var gp = mapToItem(dragProxy.parent, mouse.x, mouse.y)
+                                dragProxy.x = gp.x - dragProxy.width / 2
+                                dragProxy.y = gp.y - dragProxy.height / 2
+                            }
+                        }
+                        onReleased: mouse => {
+                            if (isDragging) {
+                                dragProxy.Drag.drop()
+                                internal.endDrag()
+                                isDragging = false
+                                return
+                            }
+                            if (deferredSelect && mediaPoolNotifier && asset.id) {
+                                mediaPoolNotifier.selectAsset(asset.id)
+                                deferredSelect = false
+                            }
+                        }
+                        onDoubleClicked: {
+                            if (!isDragging)
+                                internal.addAssetToTimeline(asset)
+                        }
                     }
                 }
             }
         }
 
-        // ---- Footer: asset count ----
+        // ---- Footer: asset count + thumbnail slider ----
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 22
+            Layout.preferredHeight: 26
             color: "#0D0D1A"
             Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: "#252540" }
 
-            Label {
-                anchors.centerIn: parent
-                text: mediaPoolNotifier ? (mediaPoolNotifier.assetCount + " assets") : "0 assets"
-                font.pixelSize: 10; color: "#6B6B88"
+            RowLayout {
+                anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 6
+
+                Label {
+                    text: {
+                        var count = mediaPoolNotifier ? mediaPoolNotifier.assetCount : 0
+                        var sel = mediaPoolNotifier ? mediaPoolNotifier.selectedAssetCount : 0
+                        return sel > 0 ? (sel + " of " + count + " selected") : (count + " assets")
+                    }
+                    font.pixelSize: 10; color: "#6B6B88"
+                }
+
+                Item { Layout.fillWidth: true }
+
+                // Thumbnail size slider (grid view only)
+                Label { visible: root.isGridView; text: "\u25A3"; font.pixelSize: 9; color: "#6B6B88" }
+                Slider {
+                    visible: root.isGridView
+                    Layout.preferredWidth: 60
+                    from: 80; to: 240; value: root.thumbWidth
+                    onMoved: root.thumbWidth = value
+                    background: Rectangle {
+                        x: parent.leftPadding; y: parent.topPadding + parent.availableHeight / 2 - 1
+                        width: parent.availableWidth; height: 2; radius: 1; color: "#252540"
+                    }
+                }
+                Label { visible: root.isGridView; text: "\u25A3"; font.pixelSize: 13; color: "#6B6B88" }
             }
         }
     }
@@ -489,6 +926,72 @@ Item {
     // ---- Helpers ----
     QtObject {
         id: internal
+
+        function beginDrag(asset) {
+            // Build payload for all selected assets (or just the dragged one)
+            var items = []
+            var selectedIds = mediaPoolNotifier ? mediaPoolNotifier.selectedAssetIds : []
+            var isDraggedSelected = false
+            for (var i = 0; i < selectedIds.length; ++i) {
+                if (selectedIds[i] === asset.id) { isDraggedSelected = true; break }
+            }
+
+            if (isDraggedSelected && selectedIds.length > 1) {
+                // Build an id→true lookup map for O(1) checks instead of O(S) inner loop
+                var selectedSet = {}
+                for (var si = 0; si < selectedIds.length; ++si)
+                    selectedSet[selectedIds[si]] = true
+
+                // Single pass over filteredAssets — O(A) instead of O(S × A)
+                var allAssets = mediaPoolNotifier.filteredAssets
+                for (var a = 0; a < allAssets.length; ++a) {
+                    if (selectedSet[allAssets[a].id]) {
+                        items.push({
+                            assetId: allAssets[a].id || "",
+                            mediaType: allAssets[a].mediaType || "video",
+                            displayName: allAssets[a].displayName || "Untitled",
+                            sourcePath: allAssets[a].filePath || "",
+                            duration: allAssets[a].duration || 5.0
+                        })
+                    }
+                }
+            } else {
+                items.push({
+                    assetId: asset.id || "",
+                    mediaType: asset.mediaType || "video",
+                    displayName: asset.displayName || "Untitled",
+                    sourcePath: asset.filePath || "",
+                    duration: asset.duration || 5.0
+                })
+            }
+
+            var payload = {
+                type: "media",
+                // Keep single-item fields for backward compat
+                assetId: items[0].assetId,
+                mediaType: items[0].mediaType,
+                displayName: items.length > 1 ? (items.length + " items") : items[0].displayName,
+                sourcePath: items[0].sourcePath,
+                duration: items[0].duration,
+                // Multi-item array
+                assets: items
+            }
+            dragProxy.assetData = payload
+            dragProxy.mediaType = payload.mediaType
+            dragProxy.displayName = payload.displayName
+            dragProxy.dragCount = items.length
+            dragProxy.Drag.mimeData = { "text/plain": JSON.stringify(payload) }
+            dragProxy.visible = true
+            dragProxy.Drag.active = true
+            console.log("[VE2MediaPool] drag started:", items.length, "item(s)")
+        }
+
+        function endDrag() {
+            dragProxy.Drag.active = false
+            dragProxy.visible = false
+            dragProxy.assetData = {}
+            dragProxy.dragCount = 1
+        }
 
         // Add an asset directly to the timeline — single code path, no signal indirection.
         function addAssetToTimeline(asset) {
@@ -525,6 +1028,54 @@ Item {
             }
         }
 
+        // Marquee rubber-band selection: select items whose grid cells intersect the rect
+        function marqueeSelect(start, end, preserveIds) {
+            if (!mediaPoolNotifier) return
+            var assets = mediaPoolNotifier.filteredAssets
+            if (!assets || assets.length === 0) return
+
+            var rx = Math.min(start.x, end.x)
+            var ry = Math.min(start.y, end.y)
+            var rw = Math.abs(end.x - start.x)
+            var rh = Math.abs(end.y - start.y)
+
+            // Use the active view to determine item positions
+            var view = root.isGridView ? gridView : listView
+
+            // Deselect all first, then re-select preserved + intersected
+            mediaPoolNotifier.deselectAll()
+            // Restore previously selected
+            for (var p = 0; p < preserveIds.length; p++)
+                mediaPoolNotifier.toggleAssetSelection(preserveIds[p])
+
+            if (root.isGridView) {
+                var cols = Math.max(1, Math.floor(gridView.width / gridView.cellWidth))
+                for (var i = 0; i < assets.length; i++) {
+                    var col = i % cols
+                    var row = Math.floor(i / cols)
+                    var cx = col * gridView.cellWidth
+                    var cy = row * gridView.cellHeight - gridView.contentY
+                    var cw = gridView.cellWidth - 4
+                    var ch = gridView.cellHeight - 4
+
+                    // Rectangle intersection test
+                    if (cx < rx + rw && cx + cw > rx && cy < ry + rh && cy + ch > ry) {
+                        if (!mediaPoolNotifier.isAssetSelected(assets[i].id))
+                            mediaPoolNotifier.toggleAssetSelection(assets[i].id)
+                    }
+                }
+            } else {
+                for (var j = 0; j < assets.length; j++) {
+                    var ly = j * (38 + 2) - listView.contentY
+                    var lh = 38
+                    if (ly < ry + rh && ly + lh > ry) {
+                        if (!mediaPoolNotifier.isAssetSelected(assets[j].id))
+                            mediaPoolNotifier.toggleAssetSelection(assets[j].id)
+                    }
+                }
+            }
+        }
+
         function formatDuration(sec) {
             if (sec === undefined || sec <= 0) return ""
             var mins = Math.floor(sec / 60)
@@ -534,5 +1085,164 @@ Item {
             }
             return sec.toFixed(1) + "s"
         }
+
+        function formatTimecode(sec) {
+            if (sec === undefined || sec < 0) sec = 0
+            var h = Math.floor(sec / 3600)
+            var m = Math.floor((sec % 3600) / 60)
+            var s = Math.floor(sec % 60)
+            var f = Math.round((sec % 1) * 30)  // assume 30fps for frame count
+            return (h < 10 ? "0" : "") + h + ":"
+                 + (m < 10 ? "0" : "") + m + ":"
+                 + (s < 10 ? "0" : "") + s + ":"
+                 + (f < 10 ? "0" : "") + f
+        }
+    }
+
+    // ================================================================
+    // Right-click context menu
+    // ================================================================
+    Menu {
+        id: poolContextMenu
+        property string _targetAssetId: ""
+        property string _targetAssetName: ""
+
+        MenuItem {
+            text: "Add to Timeline"
+            onTriggered: {
+                var assets = mediaPoolNotifier ? mediaPoolNotifier.filteredAssets : []
+                for (var i = 0; i < assets.length; i++) {
+                    if (assets[i].id === poolContextMenu._targetAssetId) {
+                        internal.addAssetToTimeline(assets[i])
+                        break
+                    }
+                }
+            }
+        }
+        MenuSeparator {}
+        MenuItem {
+            text: "Rename"
+            onTriggered: renameDialog.open()
+        }
+        MenuItem {
+            text: "Reveal in File Explorer"
+            onTriggered: {
+                if (mediaPoolNotifier)
+                    mediaPoolNotifier.revealInExplorer(poolContextMenu._targetAssetId)
+            }
+        }
+        MenuSeparator {}
+        MenuItem {
+            text: "Move to Bin..."
+            enabled: mediaPoolNotifier && mediaPoolNotifier.bins.length > 0
+            onTriggered: moveToBinMenu.popup()
+        }
+        MenuItem {
+            text: {
+                var count = mediaPoolNotifier ? mediaPoolNotifier.selectedAssetCount : 0
+                return count > 1 ? ("Delete " + count + " items") : "Delete from Pool"
+            }
+            onTriggered: {
+                if (!mediaPoolNotifier) return
+                var ids = mediaPoolNotifier.selectedAssetIds
+                for (var i = 0; i < ids.length; i++)
+                    mediaPoolNotifier.removeAsset(ids[i])
+            }
+        }
+    }
+
+    // Move to Bin sub-menu
+    Menu {
+        id: moveToBinMenu
+        Repeater {
+            model: mediaPoolNotifier ? mediaPoolNotifier.bins : []
+            delegate: MenuItem {
+                text: modelData.name || "Bin"
+                onTriggered: {
+                    if (mediaPoolNotifier) {
+                        var ids = mediaPoolNotifier.selectedAssetIds
+                        for (var i = 0; i < ids.length; i++)
+                            mediaPoolNotifier.moveAssetToBin(ids[i], modelData.id)
+                    }
+                }
+            }
+        }
+    }
+
+    // ================================================================
+    // Rename dialog (F2)
+    // ================================================================
+    Dialog {
+        id: renameDialog
+        title: "Rename Asset"
+        modal: true; anchors.centerIn: Overlay.overlay
+        width: 280; standardButtons: Dialog.Cancel | Dialog.Ok
+        background: Rectangle { radius: 10; color: "#1A1A34"; border.color: "#303050" }
+
+        contentItem: TextField {
+            id: renameField
+            font.pixelSize: 14; color: "#E0E0F0"
+            background: Rectangle { radius: 6; color: "#12122A"; border.color: "#6C63FF" }
+            onAccepted: renameDialog.accept()
+        }
+        onOpened: {
+            renameField.text = poolContextMenu._targetAssetName
+            renameField.forceActiveFocus()
+            renameField.selectAll()
+        }
+        onAccepted: {
+            if (mediaPoolNotifier && renameField.text.trim().length > 0) {
+                var ids = mediaPoolNotifier.selectedAssetIds
+                if (ids.length > 0)
+                    mediaPoolNotifier.renameAsset(ids[0], renameField.text.trim())
+            }
+        }
+    }
+
+    // ================================================================
+    // New Bin dialog
+    // ================================================================
+    Dialog {
+        id: newBinDialog
+        title: "New Bin"
+        modal: true; anchors.centerIn: Overlay.overlay
+        width: 260; standardButtons: Dialog.Cancel | Dialog.Ok
+        background: Rectangle { radius: 10; color: "#1A1A34"; border.color: "#303050" }
+
+        contentItem: TextField {
+            id: newBinField
+            placeholderText: "Bin name"
+            font.pixelSize: 14; color: "#E0E0F0"
+            background: Rectangle { radius: 6; color: "#12122A"; border.color: "#6C63FF" }
+            onAccepted: newBinDialog.accept()
+        }
+        onOpened: { newBinField.text = ""; newBinField.forceActiveFocus() }
+        onAccepted: {
+            if (mediaPoolNotifier && newBinField.text.trim().length > 0)
+                mediaPoolNotifier.createBin(newBinField.text.trim())
+        }
+    }
+
+    // ================================================================
+    // Toast notifications (import rejected, duplicate)
+    // ================================================================
+    Rectangle {
+        id: poolToast
+        visible: false; z: 200
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: parent.bottom; anchors.bottomMargin: 30
+        width: poolToastLbl.implicitWidth + 20; height: 28; radius: 6
+        color: Qt.rgba(0.94, 0.33, 0.31, 0.9)
+
+        Label { id: poolToastLbl; anchors.centerIn: parent; font.pixelSize: 11; color: "#FFFFFF" }
+
+        function show(msg) { poolToastLbl.text = msg; visible = true; poolToastTimer.restart() }
+        Timer { id: poolToastTimer; interval: 3000; onTriggered: poolToast.visible = false }
+    }
+
+    Connections {
+        target: mediaPoolNotifier
+        function onImportRejected(fileName, reason) { poolToast.show(reason) }
+        function onDuplicateDetected(fileName) { poolToast.show("Already imported: " + fileName) }
     }
 }

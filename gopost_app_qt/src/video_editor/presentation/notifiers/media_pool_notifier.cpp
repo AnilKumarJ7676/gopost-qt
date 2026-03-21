@@ -1,5 +1,6 @@
 #include "video_editor/presentation/notifiers/media_pool_notifier.h"
 
+#include <QDir>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -8,8 +9,11 @@
 #include <QUrl>
 #include <QUuid>
 #include <QVariantMap>
+#include <QtConcurrent>
 #include <algorithm>
 #include <cmath>
+
+#include "video_editor/data/services/import_pipeline.h"
 
 namespace gopost::video_editor {
 
@@ -59,9 +63,47 @@ QString MediaPoolNotifier::generateAssetId() const {
 // Assets
 // ---------------------------------------------------------------------------
 
+static const QStringList kVideoExts = {
+    QStringLiteral("mp4"), QStringLiteral("mov"), QStringLiteral("avi"),
+    QStringLiteral("mkv"), QStringLiteral("webm"), QStringLiteral("m4v"),
+    QStringLiteral("flv"), QStringLiteral("wmv"), QStringLiteral("3gp"),
+    QStringLiteral("mxf"), QStringLiteral("ts")
+};
+static const QStringList kImageExts = {
+    QStringLiteral("jpg"), QStringLiteral("jpeg"), QStringLiteral("png"),
+    QStringLiteral("webp"), QStringLiteral("gif"), QStringLiteral("bmp"),
+    QStringLiteral("heic"), QStringLiteral("heif"), QStringLiteral("tiff"),
+    QStringLiteral("tif"), QStringLiteral("exr"), QStringLiteral("dpx")
+};
+static const QStringList kAudioExts = {
+    QStringLiteral("mp3"), QStringLiteral("aac"), QStringLiteral("wav"),
+    QStringLiteral("m4a"), QStringLiteral("flac"), QStringLiteral("ogg"),
+    QStringLiteral("wma"), QStringLiteral("opus"), QStringLiteral("aiff")
+};
+
 void MediaPoolNotifier::importFile(const QString& path) {
     qDebug() << "[MediaPool] importFile:" << path;
     QFileInfo fi(path);
+
+    // Format whitelist check
+    const auto ext = fi.suffix().toLower();
+    bool supported = kVideoExts.contains(ext) || kImageExts.contains(ext) || kAudioExts.contains(ext);
+    if (!supported) {
+        qDebug() << "[MediaPool] rejected unsupported format:" << ext;
+        emit importRejected(fi.fileName(), QStringLiteral("Unsupported format: .%1").arg(ext));
+        return;
+    }
+
+    // Duplicate detection: check path + size + lastModified
+    for (const auto& existing : state_.assets) {
+        if (existing.filePath == path &&
+            existing.fileSizeBytes == fi.size()) {
+            qDebug() << "[MediaPool] duplicate detected:" << fi.fileName();
+            emit duplicateDetected(fi.fileName());
+            return;
+        }
+    }
+
     MediaAsset asset;
     asset.id            = generateAssetId();
     asset.filePath      = path;
@@ -70,42 +112,62 @@ void MediaPoolNotifier::importFile(const QString& path) {
     asset.importedAt    = QDateTime::currentDateTime();
     asset.status        = fi.exists() ? MediaAssetStatus::Online : MediaAssetStatus::Offline;
 
-    // Detect type by extension
-    const auto ext = fi.suffix().toLower();
-    static const QStringList videoExts = {
-        QStringLiteral("mp4"), QStringLiteral("mov"), QStringLiteral("avi"),
-        QStringLiteral("mkv"), QStringLiteral("webm"), QStringLiteral("m4v"),
-        QStringLiteral("flv"), QStringLiteral("wmv"), QStringLiteral("3gp")
-    };
-    static const QStringList imageExts = {
-        QStringLiteral("jpg"), QStringLiteral("jpeg"), QStringLiteral("png"),
-        QStringLiteral("webp"), QStringLiteral("gif"), QStringLiteral("bmp"),
-        QStringLiteral("heic"), QStringLiteral("heif"), QStringLiteral("tiff")
-    };
-    static const QStringList audioExts = {
-        QStringLiteral("mp3"), QStringLiteral("aac"), QStringLiteral("wav"),
-        QStringLiteral("m4a"), QStringLiteral("flac"), QStringLiteral("ogg"),
-        QStringLiteral("wma"), QStringLiteral("opus"), QStringLiteral("aiff")
-    };
+    // Assign to active bin if one is selected
+    if (state_.activeBinId.has_value())
+        asset.binId = *state_.activeBinId;
 
-    if (videoExts.contains(ext))       asset.type = MediaAssetType::Video;
-    else if (imageExts.contains(ext))  asset.type = MediaAssetType::Image;
-    else if (audioExts.contains(ext))  asset.type = MediaAssetType::Audio;
-    else                               asset.type = MediaAssetType::Video; // default
+    if (kVideoExts.contains(ext))       asset.type = MediaAssetType::Video;
+    else if (kImageExts.contains(ext))  asset.type = MediaAssetType::Image;
+    else if (kAudioExts.contains(ext))  asset.type = MediaAssetType::Audio;
 
-    // Probe media metadata (duration, resolution, frame rate)
-    if (fi.exists()) {
-        probeMediaMetadata(asset);
+    // Fast path: images get default duration, no ffprobe needed
+    if (asset.type == MediaAssetType::Image) {
+        asset.durationSeconds = 5.0;
+        state_.assets.push_back(std::move(asset));
+        emit stateChanged();
+        return;
     }
 
-    qDebug() << "[MediaPool] asset added:" << asset.fileName
-             << "type=" << static_cast<int>(asset.type)
-             << "duration=" << asset.durationSeconds
-             << "resolution=" << asset.width << "x" << asset.height
-             << "fps=" << asset.frameRate;
+    // For video/audio: add immediately with placeholder metadata,
+    // then probe asynchronously on a background thread
+    asset.status = MediaAssetStatus::Probing;
+    asset.durationSeconds = 10.0;  // placeholder
+    QString assetId = asset.id;
+    QString filePath = asset.filePath;
 
     state_.assets.push_back(std::move(asset));
-    emit stateChanged();
+    emit stateChanged();  // UI sees asset immediately
+
+    // Background probe — concurrency-limited, does NOT block UI thread
+    QtConcurrent::run([this, assetId, filePath]() {
+        // Acquire semaphore — blocks background thread if kMaxConcurrentProbes reached
+        probeSemaphore().acquire();
+
+        MediaAsset temp;
+        temp.filePath = filePath;
+        temp.type = MediaAssetType::Video;
+        probeMediaMetadata(temp);
+
+        probeSemaphore().release();
+
+        // Push results back to main thread
+        QMetaObject::invokeMethod(this, [this, assetId,
+            dur = temp.durationSeconds, w = temp.width, h = temp.height,
+            fps = temp.frameRate, codec = temp.codec]() {
+            for (auto& a : state_.assets) {
+                if (a.id == assetId) {
+                    a.durationSeconds = dur;
+                    a.width = w;
+                    a.height = h;
+                    a.frameRate = fps;
+                    a.codec = codec;
+                    a.status = MediaAssetStatus::Online;
+                    break;
+                }
+            }
+            emit stateChanged();
+        }, Qt::QueuedConnection);
+    });
 }
 
 double MediaPoolNotifier::durationForPath(const QString& path) const {
@@ -128,7 +190,7 @@ void MediaPoolNotifier::probeMediaMetadata(MediaAsset& asset) {
     bool probed = false;
 
     QProcess ffprobe;
-    ffprobe.setProcessChannelMode(QProcess::MergedChannels);
+    ffprobe.setProcessChannelMode(QProcess::ForwardedErrorChannel);
     ffprobe.start(QStringLiteral("ffprobe"), {
         QStringLiteral("-v"), QStringLiteral("quiet"),
         QStringLiteral("-print_format"), QStringLiteral("json"),
@@ -137,8 +199,17 @@ void MediaPoolNotifier::probeMediaMetadata(MediaAsset& asset) {
         asset.filePath
     });
 
-    if (ffprobe.waitForFinished(5000)) {
-        const QByteArray output = ffprobe.readAllStandardOutput();
+    // Read incrementally to avoid QRingBuffer overflow
+    QByteArray output;
+    while (ffprobe.state() != QProcess::NotRunning || ffprobe.bytesAvailable() > 0) {
+        if (ffprobe.bytesAvailable() > 0) {
+            output.append(ffprobe.read(ffprobe.bytesAvailable()));
+        } else if (!ffprobe.waitForReadyRead(ImportGuardrails::kProbeTimeoutMs)) {
+            break;
+        }
+    }
+
+    if (ffprobe.exitCode() == 0) {
         QJsonParseError parseError;
         auto doc = QJsonDocument::fromJson(output, &parseError);
         if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
@@ -289,8 +360,20 @@ void MediaPoolNotifier::removeBin(const QString& binId) {
 }
 
 void MediaPoolNotifier::setActiveBin(const QString& binId) {
+    // Save current bin's selection
+    QString currentBin = state_.activeBinId.value_or(QString());
+    binSelections_[currentBin] = selectedAssetIds_;
+
     state_.activeBinId = binId.isEmpty() ? std::nullopt : std::optional(binId);
+
+    // Restore target bin's selection
+    QString targetBin = state_.activeBinId.value_or(QString());
+    selectedAssetIds_ = binSelections_.value(targetBin);
+    selectedAssetId_ = selectedAssetIds_.isEmpty() ? QString() : *selectedAssetIds_.begin();
+    ++selectionGeneration_;
+
     emit stateChanged();
+    emit selectionChanged();
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +398,6 @@ QVariantList MediaPoolNotifier::filteredAssetsVariant() const {
         }();
         m[QStringLiteral("duration")] = asset->durationSeconds;
         m[QStringLiteral("fileSize")] = static_cast<qint64>(asset->fileSizeBytes);
-        m[QStringLiteral("isSelected")] = (selectedAssetId_ == asset->id);
         result.append(m);
     }
     return result;
@@ -333,7 +415,73 @@ QString MediaPoolNotifier::currentFilter() const {
 
 void MediaPoolNotifier::selectAsset(const QString& assetId) {
     selectedAssetId_ = assetId;
-    emit stateChanged();
+    selectedAssetIds_.clear();
+    selectedAssetIds_.insert(assetId);
+    ++selectionGeneration_;
+    emit selectionChanged();
+}
+
+void MediaPoolNotifier::toggleAssetSelection(const QString& assetId) {
+    if (selectedAssetIds_.contains(assetId)) {
+        selectedAssetIds_.remove(assetId);
+        if (selectedAssetId_ == assetId)
+            selectedAssetId_ = selectedAssetIds_.isEmpty() ? QString() : *selectedAssetIds_.begin();
+    } else {
+        selectedAssetIds_.insert(assetId);
+        selectedAssetId_ = assetId;
+    }
+    ++selectionGeneration_;
+    emit selectionChanged();
+}
+
+void MediaPoolNotifier::rangeSelectAsset(const QString& assetId) {
+    auto filtered = state_.filteredAssets();
+    int anchorIdx = -1, targetIdx = -1;
+    for (int i = 0; i < static_cast<int>(filtered.size()); ++i) {
+        if (filtered[i]->id == selectedAssetId_) anchorIdx = i;
+        if (filtered[i]->id == assetId) targetIdx = i;
+    }
+    if (anchorIdx < 0 || targetIdx < 0) {
+        selectAsset(assetId);
+        return;
+    }
+    int lo = std::min(anchorIdx, targetIdx);
+    int hi = std::max(anchorIdx, targetIdx);
+    selectedAssetIds_.clear();
+    for (int i = lo; i <= hi; ++i)
+        selectedAssetIds_.insert(filtered[i]->id);
+    selectedAssetId_ = assetId;
+    ++selectionGeneration_;
+    emit selectionChanged();
+}
+
+void MediaPoolNotifier::selectAllInBin() {
+    auto filtered = state_.filteredAssets();
+    selectedAssetIds_.clear();
+    for (const auto* asset : filtered)
+        selectedAssetIds_.insert(asset->id);
+    if (!filtered.empty())
+        selectedAssetId_ = filtered.front()->id;
+    ++selectionGeneration_;
+    emit selectionChanged();
+}
+
+void MediaPoolNotifier::deselectAll() {
+    selectedAssetIds_.clear();
+    selectedAssetId_.clear();
+    ++selectionGeneration_;
+    emit selectionChanged();
+}
+
+bool MediaPoolNotifier::isAssetSelected(const QString& assetId) const {
+    return selectedAssetIds_.contains(assetId);
+}
+
+QVariantList MediaPoolNotifier::selectedAssetIdsVariant() const {
+    QVariantList result;
+    for (const auto& id : selectedAssetIds_)
+        result.append(id);
+    return result;
 }
 
 void MediaPoolNotifier::addToTimeline(const QString& assetId) {
@@ -362,10 +510,21 @@ void MediaPoolNotifier::showFilePicker() {
     emit filePickerRequested();
 }
 
+bool MediaPoolNotifier::validateBatchSize(int count) const {
+    if (count > ImportGuardrails::kMaxBatchSize) {
+        emit batchTooLarge(count, ImportGuardrails::kMaxBatchSize);
+        return false;
+    }
+    return true;
+}
+
 void MediaPoolNotifier::importFiles(const QVariantList& urls) {
+    if (!validateBatchSize(urls.size())) return;
+
+    int succeeded = 0, failed = 0;
+    QStringList failedNames;
+
     for (const auto& urlVar : urls) {
-        // Qt6 QML may double-wrap QUrl inside QVariant(QVariant(QUrl)).
-        // Unwrap until we get a usable type.
         QVariant v = urlVar;
         while (v.typeId() == QMetaType::QVariant)
             v = v.value<QVariant>();
@@ -381,9 +540,22 @@ void MediaPoolNotifier::importFiles(const QVariantList& urls) {
                 path = QUrl(path).toLocalFile();
         }
         qDebug() << "[MediaPool] importFiles resolved:" << path;
-        if (!path.isEmpty())
+        if (!path.isEmpty()) {
+            // Check if file exists and is readable before importing
+            QFileInfo fi(path);
+            if (!fi.exists() || !fi.isReadable()) {
+                failed++;
+                failedNames.append(fi.fileName());
+                emit importRejected(fi.fileName(), QStringLiteral("File not found or not readable"));
+                continue;
+            }
             importFile(path);
+            succeeded++;
+        }
     }
+
+    if (failed > 0)
+        emit importBatchCompleted(succeeded, failed, failedNames);
 }
 
 void MediaPoolNotifier::setFilter(const QString& filter) {
@@ -437,6 +609,125 @@ void MediaPoolNotifier::toggleSortOrder() {
 void MediaPoolNotifier::setViewMode(int mode) {
     state_.viewMode = static_cast<MediaPoolViewMode>(mode);
     emit stateChanged();
+}
+
+// ---------------------------------------------------------------------------
+// Folder import, rename, reveal, bin navigation
+// ---------------------------------------------------------------------------
+
+void MediaPoolNotifier::importFolder(const QString& path) {
+    QDir dir(path);
+    if (!dir.exists()) return;
+
+    // Create a bin mirroring the folder name
+    QString binName = dir.dirName();
+    createBin(binName);
+    // Find the bin we just created
+    QString binId;
+    for (const auto& bin : state_.bins) {
+        if (bin.name == binName) { binId = bin.id; break; }
+    }
+
+    auto prevBin = state_.activeBinId;
+    if (!binId.isEmpty())
+        state_.activeBinId = binId;
+
+    // Import all supported files
+    QFileInfoList entries = dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot);
+    for (int i = 0; i < entries.size(); ++i) {
+        const QFileInfo& entry = entries[i];
+        if (entry.isDir()) {
+            importFolder(entry.absoluteFilePath());
+        } else {
+            importFile(entry.absoluteFilePath());
+        }
+    }
+
+    state_.activeBinId = prevBin;
+    emit stateChanged();
+}
+
+void MediaPoolNotifier::renameAsset(const QString& assetId, const QString& newName) {
+    for (auto& asset : state_.assets) {
+        if (asset.id == assetId) {
+            asset.fileName = newName;
+            emit stateChanged();
+            return;
+        }
+    }
+}
+
+void MediaPoolNotifier::revealInExplorer(const QString& assetId) {
+    for (const auto& asset : state_.assets) {
+        if (asset.id == assetId) {
+#ifdef Q_OS_WIN
+            QProcess::startDetached(QStringLiteral("explorer"),
+                {QStringLiteral("/select,"), QDir::toNativeSeparators(asset.filePath)});
+#elif defined(Q_OS_MACOS)
+            QProcess::startDetached(QStringLiteral("open"),
+                {QStringLiteral("-R"), asset.filePath});
+#else
+            QProcess::startDetached(QStringLiteral("xdg-open"),
+                {QFileInfo(asset.filePath).absolutePath()});
+#endif
+            return;
+        }
+    }
+}
+
+void MediaPoolNotifier::navigateIntoBin(const QString& binId) {
+    setActiveBin(binId);
+}
+
+void MediaPoolNotifier::navigateUp() {
+    if (!state_.activeBinId.has_value()) return;
+    // Find parent bin
+    for (const auto& bin : state_.bins) {
+        if (bin.id == *state_.activeBinId) {
+            setActiveBin(bin.parentId.value_or(QString()));
+            return;
+        }
+    }
+    setActiveBin(QString());
+}
+
+QString MediaPoolNotifier::binBreadcrumb() const {
+    if (!state_.activeBinId.has_value()) return QStringLiteral("All Media");
+    QStringList parts;
+    QString currentId = *state_.activeBinId;
+    while (!currentId.isEmpty()) {
+        for (const auto& bin : state_.bins) {
+            if (bin.id == currentId) {
+                parts.prepend(bin.name);
+                currentId = bin.parentId.value_or(QString());
+                break;
+            }
+        }
+        if (parts.isEmpty()) break; // safety
+    }
+    parts.prepend(QStringLiteral("All Media"));
+    return parts.join(QStringLiteral(" > "));
+}
+
+QString MediaPoolNotifier::activeBinId() const {
+    return state_.activeBinId.value_or(QString());
+}
+
+QVariantList MediaPoolNotifier::binsVariant() const {
+    QVariantList result;
+    for (const auto& bin : state_.bins) {
+        // Only show bins at current level
+        QString parentId = bin.parentId.value_or(QString());
+        QString activeId = state_.activeBinId.value_or(QString());
+        if (parentId != activeId) continue;
+
+        QVariantMap m;
+        m[QStringLiteral("id")] = bin.id;
+        m[QStringLiteral("name")] = bin.name;
+        m[QStringLiteral("parentId")] = parentId;
+        result.append(m);
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------

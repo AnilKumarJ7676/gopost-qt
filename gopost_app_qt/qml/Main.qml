@@ -9,6 +9,13 @@ ApplicationWindow {
     visible: true
     title: "Gopost"
 
+    onClosing: function(close) {
+        // Stop timeline playback before closing to prevent
+        // audio/video continuing after the window is destroyed
+        if (timelineNotifier && timelineNotifier.isPlaying)
+            timelineNotifier.togglePlayPause()
+    }
+
     Material.theme: Material.System
     Material.primary: "#6C5CE7"
     Material.accent: "#00B894"
@@ -46,9 +53,13 @@ ApplicationWindow {
 
                 var component = resolveComponent(route)
                 if (component) {
-                    console.log("[Main] Replacing StackView with component for route:", route)
-                    mainStack.replace(component)
+                    console.log("[Main] Replacing StackView with component for route:", route,
+                                "category:", category, "prev:", currentScreenCategory)
+                    mainStack.replace(null, component)
                     currentScreenCategory = category
+                    console.log("[Main] StackView depth:", mainStack.depth,
+                                "currentItem:", mainStack.currentItem,
+                                "size:", mainStack.width, "x", mainStack.height)
                 } else {
                     console.warn("[Main] No component found for route:", route)
                 }
@@ -68,73 +79,51 @@ ApplicationWindow {
         if (route === "/auth/register") return authRegisterComponent
 
         // Editor routes
-        if (route === "/editor/video") return videoEditorComponent
-        if (route === "/editor/video2") return videoEditor2Component
+        if (route.startsWith("/editor/video")) return videoEditor2Component
         if (route === "/editor/image") return imageEditorComponent
         if (route.startsWith("/editor/customize/")) return templateCustomizationComponent
-        if (route.startsWith("/editor/video/customize/")) return videoTemplateCustomizationComponent
-        if (route === "/projects/video") return projectListComponent
 
         // Export
         if (route === "/export/image") return imageExportComponent
-        if (route === "/export/video") return videoExportComponent
+        // Video export removed with v1 editor
 
         return null
     }
 
     // Component declarations for lazy loading
+    // Each uses Item wrapper so StackView can set width/height, Loader fills it
     Component {
         id: authLoginComponent
-        Loader { source: "qrc:/qt/qml/GopostApp/qml/auth/screens/LoginScreen.qml" }
+        Item { Loader { anchors.fill: parent; source: "qrc:/qt/qml/GopostApp/qml/auth/screens/LoginScreen.qml" } }
     }
 
     Component {
         id: authRegisterComponent
-        Loader { source: "qrc:/qt/qml/GopostApp/qml/auth/screens/RegisterScreen.qml" }
+        Item { Loader { anchors.fill: parent; source: "qrc:/qt/qml/GopostApp/qml/auth/screens/RegisterScreen.qml" } }
     }
 
     Component {
         id: mainShellComponent
-        Loader { source: "qrc:/qt/qml/GopostApp/qml/core/navigation/MainShell.qml" }
-    }
-
-    Component {
-        id: videoEditorComponent
-        Loader { source: "qrc:/qt/qml/GopostApp/qml/video_editor/screens/VideoEditorScreen.qml" }
+        Item { Loader { anchors.fill: parent; source: "qrc:/qt/qml/GopostApp/qml/core/navigation/MainShell.qml" } }
     }
 
     Component {
         id: videoEditor2Component
-        Loader { source: "qrc:/qt/qml/GopostApp/qml/video_editor_2/screens/VideoEditor2Screen.qml" }
+        Item { Loader { anchors.fill: parent; source: "qrc:/qt/qml/GopostApp/qml/video_editor_2/screens/VideoEditor2Screen.qml" } }
     }
 
     Component {
         id: imageEditorComponent
-        Loader { source: "qrc:/qt/qml/GopostApp/qml/image_editor/screens/ImageEditorScreen.qml" }
+        Item { Loader { anchors.fill: parent; source: "qrc:/qt/qml/GopostApp/qml/image_editor/screens/ImageEditorScreen.qml" } }
     }
 
     Component {
         id: templateCustomizationComponent
-        Loader { source: "qrc:/qt/qml/GopostApp/qml/image_editor/screens/TemplateCustomizationScreen.qml" }
-    }
-
-    Component {
-        id: videoTemplateCustomizationComponent
-        Loader { source: "qrc:/qt/qml/GopostApp/qml/video_editor/screens/VideoTemplateCustomizationScreen.qml" }
-    }
-
-    Component {
-        id: projectListComponent
-        Loader { source: "qrc:/qt/qml/GopostApp/qml/video_editor/screens/ProjectListScreen.qml" }
+        Item { Loader { anchors.fill: parent; source: "qrc:/qt/qml/GopostApp/qml/image_editor/screens/TemplateCustomizationScreen.qml" } }
     }
 
     Component {
         id: imageExportComponent
-        Loader { source: "qrc:/qt/qml/GopostApp/qml/image_editor/screens/ExportScreen.qml" }
-    }
-
-    Component {
-        id: videoExportComponent
-        Loader { source: "qrc:/qt/qml/GopostApp/qml/video_editor/screens/VideoExportScreen.qml" }
+        Item { Loader { anchors.fill: parent; source: "qrc:/qt/qml/GopostApp/qml/image_editor/screens/ExportScreen.qml" } }
     }
 }

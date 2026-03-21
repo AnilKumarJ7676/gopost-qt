@@ -482,7 +482,12 @@ void GopostVideoTimelineEngineNative::clearClipKeyframes(int timelineId,
 void GopostVideoTimelineEngineNative::setClipColorGrading(
     int timelineId, int clipId, double brightness, double contrast,
     double saturation, double exposure, double temperature, double tint,
-    double highlights, double shadows, double vibrance, double hue) {
+    double highlights, double shadows, double vibrance, double hue,
+    double fade, double vignette) {
+    // Pass fade/vignette to native engine when the Go backend adds support;
+    // for now they are applied at the Qt rendering layer.
+    Q_UNUSED(fade);
+    Q_UNUSED(vignette);
     checkErr(gopost_timeline_set_clip_color_grading(
         getTimeline(timelineId), clipId, brightness, contrast, saturation,
         exposure, temperature, tint, highlights, shadows, vibrance, hue));

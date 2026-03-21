@@ -254,6 +254,90 @@ void AdvancedEditDelegate::freezeFrame(int clipId) {
     ops_->pushUndo(before);
 }
 
+void AdvancedEditDelegate::addFreezeFrame(int clipId, double freezeDuration, bool ripple) {
+    auto state = ops_->currentState();
+    if (!state.project) return;
+    const double pos = state.playback.positionSeconds;
+
+    // Find the clip and its track
+    const VideoClip* origClip = state.project->findClip(clipId);
+    if (!origClip) return;
+    if (pos < origClip->timelineIn + 0.001 || pos > origClip->timelineOut - 0.001) return;
+
+    auto before = *state.project;
+    const int trackIdx = origClip->trackIndex;
+    auto& tracks = state.project->tracks;
+    if (trackIdx < 0 || trackIdx >= static_cast<int>(tracks.size())) return;
+    auto& clips = tracks[trackIdx].clips;
+
+    // Calculate source position at playhead
+    double timelineElapsed = pos - origClip->timelineIn;
+    double sourceElapsed = timelineElapsed * origClip->speed;
+    double freezeSourceTime = origClip->sourceIn + sourceElapsed;
+
+    // Step 1: Split the original clip at the playhead
+    // Find the clip in the track's clip list
+    int origIdx = -1;
+    for (int i = 0; i < clips.size(); ++i) {
+        if (clips[i].id == clipId) { origIdx = i; break; }
+    }
+    if (origIdx < 0) return;
+
+    // Create the second half of the split
+    VideoClip secondHalf = clips[origIdx];
+    secondHalf.id = ops_->undoRedo() ? static_cast<int>(std::chrono::steady_clock::now().time_since_epoch().count() % 100000 + 10000)
+                                     : clipId + 2000;
+    secondHalf.timelineIn  = pos + freezeDuration;
+    secondHalf.timelineOut = clips[origIdx].timelineOut + freezeDuration;
+    secondHalf.sourceIn    = freezeSourceTime;
+
+    // Trim original clip to end at playhead
+    clips[origIdx].timelineOut = pos;
+    clips[origIdx].sourceOut   = freezeSourceTime;
+
+    // Step 2: Create the freeze frame clip
+    VideoClip freezeClip;
+    freezeClip.id           = secondHalf.id + 1;
+    freezeClip.trackIndex   = trackIdx;
+    freezeClip.sourceType   = origClip->sourceType;
+    freezeClip.sourcePath   = origClip->sourcePath;
+    freezeClip.displayName  = origClip->displayName + QStringLiteral(" [Freeze]");
+    freezeClip.timelineIn   = pos;
+    freezeClip.timelineOut  = pos + freezeDuration;
+    freezeClip.sourceIn     = freezeSourceTime;
+    freezeClip.sourceOut    = freezeSourceTime + 0.001; // near-zero source range
+    freezeClip.speed        = 0.001;  // engine interprets as frozen frame
+    freezeClip.opacity      = origClip->opacity;
+    freezeClip.blendMode    = origClip->blendMode;
+    freezeClip.isFreezeFrame = true;
+
+    // Step 3: If ripple mode, push ALL downstream clips on this track forward
+    if (ripple) {
+        for (auto& c : clips) {
+            if (c.id != clipId && c.timelineIn >= pos - 0.001) {
+                c.timelineIn  += freezeDuration;
+                c.timelineOut += freezeDuration;
+            }
+        }
+    }
+
+    // Insert freeze clip and second half after the original
+    clips.insert(clips.begin() + origIdx + 1, freezeClip);
+    clips.insert(clips.begin() + origIdx + 2, secondHalf);
+
+    state.trackGeneration++;
+    state.selectionGeneration++;
+    // Select the freeze clip
+    state.selectedClipId = freezeClip.id;
+    state.selectedClipIds.clear();
+    state.selectedClipIds.insert(freezeClip.id);
+
+    ops_->setState(std::move(state));
+    ops_->pushUndo(before);
+    ops_->syncNativeToProject();
+    ops_->debouncedRenderFrame();
+}
+
 // ---------------------------------------------------------------------------
 // Speed ramp
 // ---------------------------------------------------------------------------

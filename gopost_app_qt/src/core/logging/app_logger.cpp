@@ -1,4 +1,5 @@
 #include "core/logging/app_logger.h"
+#include "core/engines/logging_engine.h"
 
 #include <QDateTime>
 #include <QFile>
@@ -57,28 +58,53 @@ void AppLogger::init() {
 }
 
 void AppLogger::debug(const QString& message) {
+    if (auto* engine = engines::LoggingEngine::instance()) {
+        engine->debug(QStringLiteral("App"), message);
+        return;
+    }
     qDebug().noquote() << message;
 }
 
 void AppLogger::info(const QString& message) {
+    if (auto* engine = engines::LoggingEngine::instance()) {
+        engine->info(QStringLiteral("App"), message);
+        return;
+    }
     qInfo().noquote() << message;
 }
 
 void AppLogger::warning(const QString& message) {
+    if (auto* engine = engines::LoggingEngine::instance()) {
+        engine->warning(QStringLiteral("App"), message);
+        return;
+    }
     qWarning().noquote() << message;
 }
 
 void AppLogger::error(const QString& message,
                       const QString& error,
                       const QString& stackTrace) {
-    qCritical().noquote() << message;
-    if (!error.isEmpty())
-        qCritical().noquote() << QStringLiteral("  Error: ") << error;
+    if (auto* engine = engines::LoggingEngine::instance()) {
+        QVariantMap ctx;
+        if (!error.isEmpty()) ctx[QStringLiteral("error")] = error;
+        if (!stackTrace.isEmpty()) ctx[QStringLiteral("stackTrace")] = stackTrace;
+        engine->error(QStringLiteral("App"), message, ctx);
+    } else {
+        qCritical().noquote() << message;
+        if (!error.isEmpty())
+            qCritical().noquote() << QStringLiteral("  Error: ") << error;
+    }
     reportCrash(error.isEmpty() ? message : error, stackTrace);
 }
 
 void AppLogger::fatal(const QString& error, const QString& stackTrace) {
-    qCritical().noquote() << QStringLiteral("FATAL: ") << error;
+    if (auto* engine = engines::LoggingEngine::instance()) {
+        QVariantMap ctx;
+        if (!stackTrace.isEmpty()) ctx[QStringLiteral("stackTrace")] = stackTrace;
+        engine->fatal(QStringLiteral("App"), error, ctx);
+    } else {
+        qCritical().noquote() << QStringLiteral("FATAL: ") << error;
+    }
     reportCrash(error, stackTrace, true);
 }
 

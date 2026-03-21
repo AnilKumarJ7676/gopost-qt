@@ -38,10 +38,17 @@ public:
                 const QString& displayName,
                 double duration);
 
+    QList<int> addClipsBatch(int trackIndex,
+                             const QList<ClipSourceType>& sourceTypes,
+                             const QStringList& sourcePaths,
+                             const QStringList& displayNames,
+                             const QList<double>& durations);
+
     void removeClip(int clipId, bool ripple = false);
     void moveClip(int clipId, int toTrackIndex, double toTimelineIn);
     void trimClip(int clipId, double newIn, double newOut);
     void splitClipAtPlayhead();
+    void splitClipAtPosition(int clipId, double timelinePosition);
     void rippleDelete(int clipId);
     void duplicateClip(int clipId);
 
@@ -53,6 +60,9 @@ public:
 
     // ---- gap management ----------------------------------------------------
     void closeTrackGaps(int trackIndex);
+    void deleteAllGaps();
+    void closeGapAt(int trackIndex, double gapStart);
+    void insertSlugAt(int trackIndex, double gapStart, double gapDuration);
 
     // ---- clip update helper ------------------------------------------------
     void updateClipDuration(int clipId, double duration);
@@ -79,6 +89,13 @@ private:
     // Magnetic snapping
     double magneticSnap(const VideoTrack& track, double position,
                         int excludeClipId = -1) const;
+
+    // Magnetic timeline helpers (public for use by TimelineNotifier)
+public:
+    static void compactTrack(QList<VideoClip>& clips);
+    void moveConnectedClips(int primaryClipId, double deltaTime);
+private:
+    bool isMagneticPrimaryTrack(int trackIndex) const;
 };
 
 } // namespace gopost::video_editor

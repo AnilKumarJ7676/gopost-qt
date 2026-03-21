@@ -129,6 +129,25 @@ TimelineNotifier::TimelineNotifier(QObject* parent)
         lastRenderTime_ = std::chrono::steady_clock::now();
         renderCurrentFrame();
     });
+
+    // Render debounce timer — coalesces rapid render requests.
+    // 150ms gives batch operations (add clips → select → autoFit) time to
+    // settle before triggering a full engine rebuild + render.  The old 50ms
+    // interval wasn't enough: a multi-file drop would fire 3-4 syncs.
+    renderDebounceTimer_.setSingleShot(true);
+    renderDebounceTimer_.setInterval(150);
+    connect(&renderDebounceTimer_, &QTimer::timeout, this, [this] {
+        renderCurrentFrame();
+    });
+
+    // Auto-save timer (Version History)
+    autoSaveTimer_.setInterval(autoSaveIntervalMs_);
+    connect(&autoSaveTimer_, &QTimer::timeout, this, [this] {
+        if (state_.project && state_.isReady()) {
+            saveVersion(QStringLiteral("Auto-save"));
+        }
+    });
+    autoSaveTimer_.start();
 }
 
 TimelineNotifier::~TimelineNotifier() = default;
@@ -156,6 +175,7 @@ void TimelineNotifier::initTimeline() {
     videoTrack.type  = TrackType::Video;
     videoTrack.index = 1;
     videoTrack.label = QStringLiteral("Video 1");
+    videoTrack.isMagneticPrimary = true;  // Primary storyline (magnetic timeline)
 
     VideoTrack audioTrack;
     audioTrack.type  = TrackType::Audio;
@@ -166,8 +186,21 @@ void TimelineNotifier::initTimeline() {
 
     state_.project = std::move(project);
     state_.phase   = TimelinePhase::ready;
-    syncNativeToProject();
+    syncNativeToProjectImmediate();  // immediate on init — engine must be ready
     playbackTimer_.start();
+
+    // Initialize first timeline tab
+    timelineTabs_.clear();
+    activeTabIndex_ = 0;
+    nextTabId_ = 1;
+    stackedView_ = false;
+    stackedSecondaryIndex_ = -1;
+    TimelineTab firstTab;
+    firstTab.id = nextTabId_++;
+    firstTab.label = QStringLiteral("Timeline 1");
+    firstTab.state = state_;
+    firstTab.engineTimelineId = engineTimelineId_;
+    timelineTabs_.append(std::move(firstTab));
 
     // Emit all signals on init so QML picks up the full initial state
     emit stateChanged();
@@ -175,6 +208,7 @@ void TimelineNotifier::initTimeline() {
     emit tracksChanged();
     emit selectionChanged();
     emit zoomChanged();
+    emit tabsChanged();
 
     qDebug() << "[TimelineNotifier] initTimeline done — tracks:" << state_.project->tracks.size()
              << "isReady:" << state_.isReady() << "trackCount:" << trackCount();
@@ -196,7 +230,7 @@ void TimelineNotifier::loadProject(const QString& projectJson) {
 
     state_.project = std::move(project);
     state_.phase   = TimelinePhase::ready;
-    syncNativeToProject();
+    syncNativeToProjectImmediate();  // immediate on load
     playbackTimer_.start();
 
     // Emit all signals on load so QML picks up the full loaded state
@@ -232,12 +266,14 @@ void TimelineNotifier::setState(TimelineState state) {
         state.scrollOffset    != prevScrollOffset_;
 
     const bool metaDirty =
-        state.phase            != state_.phase ||
-        state.canUndo          != state_.canUndo ||
-        state.canRedo          != state_.canRedo ||
-        state.activePanel      != state_.activePanel ||
-        state.useProxyPlayback != state_.useProxyPlayback ||
-        state.errorMessage     != state_.errorMessage;
+        state.phase                 != state_.phase ||
+        state.canUndo               != state_.canUndo ||
+        state.canRedo               != state_.canRedo ||
+        state.activePanel           != state_.activePanel ||
+        state.useProxyPlayback      != state_.useProxyPlayback ||
+        state.errorMessage          != state_.errorMessage ||
+        state.magneticTimelineEnabled != state_.magneticTimelineEnabled ||
+        state.positionOverrideActive  != state_.positionOverrideActive;
 
     // Apply new state
     state_ = std::move(state);
@@ -320,6 +356,11 @@ ProxyGenerationService* TimelineNotifier::proxyService() {
 }
 
 void TimelineNotifier::renderCurrentFrame() {
+    // Lazy sync: rebuild engine only when a frame is actually requested
+    if (syncNeeded_) {
+        syncNativeToProjectImmediate();
+    }
+
     auto renderStart = std::chrono::steady_clock::now();
     if (engineTimelineId_ >= 0 && stubEngine_) {
         stubEngine_->seek(engineTimelineId_, state_.playback.positionSeconds);
@@ -360,8 +401,8 @@ void TimelineNotifier::renderCurrentFrame() {
 }
 
 void TimelineNotifier::debouncedRenderFrame() {
-    // Immediate render for interactive feedback (scrub, seek, pause)
-    renderCurrentFrame();
+    // Use render debounce timer to coalesce rapid calls
+    renderDebounceTimer_.start();
 }
 
 void TimelineNotifier::throttledRenderFrame() {
@@ -399,7 +440,14 @@ int TimelineNotifier::toEngineSourceType(ClipSourceType t) const {
 }
 
 void TimelineNotifier::syncNativeToProject() {
+    // Lazy sync: just mark dirty. Actual rebuild happens in renderCurrentFrame()
+    // when a frame is actually needed (playback, scrub, seek).
+    syncNeeded_ = true;
+}
+
+void TimelineNotifier::syncNativeToProjectImmediate() {
     if (!stubEngine_ || !state_.project) return;
+    syncNeeded_ = false;
 
     // Destroy previous timeline if any
     if (engineTimelineId_ >= 0) {
@@ -445,10 +493,23 @@ void TimelineNotifier::syncNativeToProject() {
         }
     }
 
-    // Sync all clip data (effects, transitions, keyframes, audio) to engine
+    // Sync track-level state (mute, solo, volume, pan) to engine
+    for (const auto& track : state_.project->tracks) {
+        stubEngine_->setTrackMute(engineTimelineId_, track.index, track.isMuted);
+        stubEngine_->setTrackSolo(engineTimelineId_, track.index, track.isSolo);
+        stubEngine_->setTrackVolume(engineTimelineId_, track.index, track.audioSettings.volume);
+        stubEngine_->setTrackPan(engineTimelineId_, track.index, track.audioSettings.pan);
+    }
+
+    // Sync clip data to engine — skip clips with default state for performance
     for (const auto& track : state_.project->tracks) {
         for (const auto& clip : track.clips) {
-            syncEffectsToEngine(clip.id);
+            // Only sync clips that have non-default effects/transitions/keyframes
+            if (clip.hasEffects() || clip.hasColorGrading() || clip.hasTransition() ||
+                clip.hasKeyframes() || clip.hasAudioMod() ||
+                clip.audio.volume != 1.0 || clip.audio.pan != 0.0) {
+                syncEffectsToEngine(clip.id);
+            }
         }
     }
 
@@ -470,7 +531,7 @@ void TimelineNotifier::syncEffectsToEngine(int clipId) {
     stubEngine_->setClipColorGrading(engineTimelineId_, clipId,
         cg.brightness, cg.contrast, cg.saturation, cg.exposure,
         cg.temperature, cg.tint, cg.highlights, cg.shadows,
-        cg.vibrance, cg.hue);
+        cg.vibrance, cg.hue, cg.fade, cg.vignette);
 
     // 2. Audio params
     stubEngine_->setClipVolume(engineTimelineId_, clipId, clip->audio.volume);
@@ -572,6 +633,96 @@ void TimelineNotifier::jumpToNextSnapPoint() {
     playback_->jumpToNextSnapPoint();
 }
 
+int TimelineNotifier::shuttleSpeed() const {
+    return playback_ ? playback_->playbackRate() == 1.0 && !state_.playback.isPlaying ? 0
+        : static_cast<int>(std::round(std::log2(std::abs(playback_->playbackRate())) + 1)
+            * (playback_->playbackRate() >= 0 ? 1 : -1))
+        : 0;
+}
+
+QString TimelineNotifier::shuttleSpeedDisplay() const {
+    if (!playback_ || !state_.playback.isPlaying) return {};
+    double rate = playback_->playbackRate();
+    if (std::abs(rate - 1.0) < 0.01) return {};
+    if (rate > 0) {
+        QString arrows = rate >= 8 ? QStringLiteral(">>>>")
+                       : rate >= 4 ? QStringLiteral(">>>")
+                       : rate >= 2 ? QStringLiteral(">>")
+                       : QStringLiteral(">");
+        return arrows + QStringLiteral(" %1x").arg(QString::number(rate, 'g', 3));
+    } else {
+        double absRate = std::abs(rate);
+        QString arrows = absRate >= 8 ? QStringLiteral("<<<<")
+                       : absRate >= 4 ? QStringLiteral("<<<")
+                       : absRate >= 2 ? QStringLiteral("<<")
+                       : QStringLiteral("<");
+        return arrows + QStringLiteral(" %1x").arg(QString::number(absRate, 'g', 3));
+    }
+}
+
+void TimelineNotifier::playInToOut() {
+    if (!state_.project) return;
+    if (!state_.playback.inPoint.has_value() || !state_.playback.outPoint.has_value()) {
+        // No in/out set — just play from current
+        playback_->play();
+        return;
+    }
+    playback_->seek(*state_.playback.inPoint);
+    playback_->play();
+}
+
+void TimelineNotifier::playAroundCurrent(double prerollSec, double postrollSec) {
+    if (!state_.project) return;
+    double pos = state_.playback.positionSeconds;
+    double startPos = std::max(0.0, pos - prerollSec);
+    playback_->seek(startPos);
+    playback_->play();
+    // Note: playback will auto-stop at outPoint or timeline end
+}
+
+void TimelineNotifier::jumpToPreviousEditPoint() {
+    if (!state_.project) return;
+    double current = state_.playback.positionSeconds;
+    double bestPos = 0.0;
+    constexpr double kEpsilon = 0.001;
+
+    for (const auto& track : state_.project->tracks) {
+        for (const auto& clip : track.clips) {
+            if (clip.timelineIn < current - kEpsilon && clip.timelineIn > bestPos)
+                bestPos = clip.timelineIn;
+            if (clip.timelineOut < current - kEpsilon && clip.timelineOut > bestPos)
+                bestPos = clip.timelineOut;
+        }
+    }
+    playback_->seek(bestPos);
+}
+
+void TimelineNotifier::jumpToNextEditPoint() {
+    if (!state_.project) return;
+    double current = state_.playback.positionSeconds;
+    double duration = state_.project->duration();
+    double bestPos = duration;
+    constexpr double kEpsilon = 0.001;
+
+    for (const auto& track : state_.project->tracks) {
+        for (const auto& clip : track.clips) {
+            if (clip.timelineIn > current + kEpsilon && clip.timelineIn < bestPos)
+                bestPos = clip.timelineIn;
+            if (clip.timelineOut > current + kEpsilon && clip.timelineOut < bestPos)
+                bestPos = clip.timelineOut;
+        }
+    }
+    playback_->seek(bestPos);
+}
+
+void TimelineNotifier::jumpToPreviousMarkerOnly() {
+    advancedEdit_->navigateToPreviousMarker();
+}
+
+void TimelineNotifier::jumpToNextMarkerOnly() {
+    advancedEdit_->navigateToNextMarker();
+}
+
 int TimelineNotifier::clipCountForTrack(int trackIndex) const {
     if (!state_.project) return 0;
     const auto& tracks = state_.project->tracks;
@@ -601,6 +752,20 @@ QVariantMap TimelineNotifier::clipData(int trackIndex, int clipIndex) const {
     result[QStringLiteral("customLabel")] = clip.customLabel;
     result[QStringLiteral("isReversed")] = clip.isReversed;
     result[QStringLiteral("hasSpeedRamp")] = clip.hasSpeedRamp();
+    result[QStringLiteral("isFreezeFrame")] = clip.isFreezeFrame;
+    result[QStringLiteral("hasEffects")] = clip.hasEffects();
+    result[QStringLiteral("effectCount")] = static_cast<int>(clip.effects.size());
+    result[QStringLiteral("hasColorGrading")] = clip.hasColorGrading();
+    result[QStringLiteral("hasTransition")] = clip.hasTransition();
+    result[QStringLiteral("transitionInType")] = static_cast<int>(clip.transitionIn.type);
+    result[QStringLiteral("transitionOutType")] = static_cast<int>(clip.transitionOut.type);
+    result[QStringLiteral("transitionInDur")] = clip.transitionIn.durationSeconds;
+    result[QStringLiteral("transitionOutDur")] = clip.transitionOut.durationSeconds;
+    result[QStringLiteral("connectedToPrimaryClipId")] = clip.connectedToPrimaryClipId.value_or(-1);
+    result[QStringLiteral("sourceDuration")] = clip.sourceDuration;
+    result[QStringLiteral("sourceIn")] = clip.sourceIn;
+    result[QStringLiteral("sourceOut")] = clip.sourceOut;
+    result[QStringLiteral("isDisabled")] = clip.isDisabled;
     return result;
 }
 
@@ -611,14 +776,72 @@ void TimelineNotifier::removeTrack(int i)            { trackClip_->removeTrack(i
 void TimelineNotifier::toggleTrackVisibility(int i)  { trackClip_->toggleTrackVisibility(i); }
 void TimelineNotifier::toggleTrackLock(int i)        { trackClip_->toggleTrackLock(i); }
 void TimelineNotifier::toggleTrackMute(int i)        { trackClip_->toggleTrackMute(i); }
-void TimelineNotifier::toggleTrackSolo(int i)        { trackClip_->toggleTrackSolo(i); }
+void TimelineNotifier::toggleTrackSolo(int i) {
+    trackClip_->toggleTrackSolo(i);
+    // Sync all track solo/mute state to engine so rendering reflects solo mode
+    if (stubEngine_ && engineTimelineId_ >= 0 && state_.project) {
+        for (const auto& track : state_.project->tracks) {
+            stubEngine_->setTrackSolo(engineTimelineId_, track.index, track.isSolo);
+            stubEngine_->setTrackMute(engineTimelineId_, track.index, track.isMuted);
+        }
+        debouncedRenderFrame();
+    }
+}
+void TimelineNotifier::soloSelectedTrack() {
+    if (!state_.project || !state_.selectedClipId.has_value()) return;
+    const auto* clip = state_.project->findClip(*state_.selectedClipId);
+    if (clip) toggleTrackSolo(clip->trackIndex);
+}
 int  TimelineNotifier::addClip(int ti, int st, const QString& sp,
                                const QString& dn, double dur) {
     return trackClip_->addClip(ti, static_cast<ClipSourceType>(st), sp, dn, dur);
 }
-void TimelineNotifier::removeClip(int id)    { trackClip_->removeClip(id, state_.rippleMode); }
+QVariantList TimelineNotifier::addClipsBatch(int trackIndex, const QVariantList& clips) {
+    QVariantList result;
+    QList<ClipSourceType> types;
+    QStringList paths, names;
+    QList<double> durs;
+    for (const auto& v : clips) {
+        auto m = v.toMap();
+        types.append(static_cast<ClipSourceType>(m.value(QStringLiteral("sourceType"), 0).toInt()));
+        paths.append(m.value(QStringLiteral("sourcePath")).toString());
+        names.append(m.value(QStringLiteral("displayName"), QStringLiteral("Untitled")).toString());
+        durs.append(m.value(QStringLiteral("duration"), 5.0).toDouble());
+    }
+    auto ids = trackClip_->addClipsBatch(trackIndex, types, paths, names, durs);
+    for (int id : ids) result.append(id);
+    return result;
+}
+
+void TimelineNotifier::removeClip(int id) {
+    // Magnetic timeline: disconnect connected clips only if removing from a magnetic primary track
+    if (state_.project && state_.magneticTimelineEnabled) {
+        const auto* clip = state_.project->findClip(id);
+        if (clip && clip->trackIndex >= 0 &&
+            clip->trackIndex < static_cast<int>(state_.project->tracks.size()) &&
+            state_.project->tracks[clip->trackIndex].isMagneticPrimary) {
+            for (auto& track : state_.project->tracks) {
+                for (auto& c : track.clips) {
+                    if (c.connectedToPrimaryClipId.has_value() &&
+                        *c.connectedToPrimaryClipId == id) {
+                        c.connectedToPrimaryClipId.reset();
+                        c.syncPointOffset.reset();
+                    }
+                }
+            }
+        }
+    }
+    trackClip_->removeClip(id, state_.rippleMode);
+}
 void TimelineNotifier::moveClip(int id, int t, double time) {
     if (!state_.project) { trackClip_->moveClip(id, t, time); return; }
+
+    // Capture old position for connected clip delta
+    double oldTimelineIn = 0;
+    {
+        const auto* clip = state_.project->findClip(id);
+        if (clip) oldTimelineIn = clip->timelineIn;
+    }
 
     // Feature 10: Capture linked clip info BEFORE the move (pointers invalidated after)
     double linkedDelta = 0;
@@ -647,6 +870,19 @@ void TimelineNotifier::moveClip(int id, int t, double time) {
         }
     }
 
+    // Magnetic timeline: move connected clips only if this clip is on a magnetic primary track
+    if (state_.magneticTimelineEnabled && state_.project) {
+        const auto* movedClip = state_.project->findClip(id);
+        if (movedClip &&
+            movedClip->trackIndex >= 0 &&
+            movedClip->trackIndex < static_cast<int>(state_.project->tracks.size()) &&
+            state_.project->tracks[movedClip->trackIndex].isMagneticPrimary) {
+            double delta = movedClip->timelineIn - oldTimelineIn;
+            if (std::abs(delta) > 0.001)
+                trackClip_->moveConnectedClips(id, delta);
+        }
+    }
+
     // Feature 9: Auto-crossfade detection is done via QML context menu
     // (not auto-detected on move, since moveClip resolves collisions)
 }
@@ -658,6 +894,29 @@ void TimelineNotifier::toggleRippleMode() {
 void TimelineNotifier::toggleInsertMode() {
     state_.insertMode = !state_.insertMode;
     emit stateChanged();
+}
+void TimelineNotifier::setTrimEditMode(int mode) {
+    auto m = static_cast<TrimEditMode>(std::clamp(mode, 0, 4));
+    if (state_.trimEditMode == m) {
+        state_.trimEditMode = TrimEditMode::Normal;  // toggle off
+    } else {
+        state_.trimEditMode = m;
+    }
+    // Sync rippleMode with trim edit mode for backwards compatibility
+    state_.rippleMode = (state_.trimEditMode == TrimEditMode::Ripple);
+    // Deactivate razor mode when entering a trim edit mode
+    if (state_.trimEditMode != TrimEditMode::Normal)
+        state_.razorModeEnabled = false;
+    emit stateChanged();
+}
+void TimelineNotifier::rollEdit(int clipId, bool leftEdge, double delta) {
+    advancedEdit_->rollEdit(clipId, leftEdge, delta);
+}
+void TimelineNotifier::slipEdit(int clipId, double delta) {
+    advancedEdit_->slipEdit(clipId, delta);
+}
+void TimelineNotifier::slideEdit(int clipId, double delta) {
+    advancedEdit_->slideEdit(clipId, delta);
 }
 void TimelineNotifier::reorderClipInsert(int clipId, int trackIndex, double atTime) {
     if (!state_.project) return;
@@ -673,7 +932,15 @@ void TimelineNotifier::reorderClipInsert(int clipId, int trackIndex, double atTi
     for (auto& track : state_.project->tracks) {
         auto it = std::find_if(track.clips.begin(), track.clips.end(),
                                [clipId](const VideoClip& c) { return c.id == clipId; });
-        if (it != track.clips.end()) { track.clips.erase(it); break; }
+        if (it != track.clips.end()) {
+            track.clips.erase(it);
+            // Magnetic timeline: compact source track if it's magnetic primary
+            if (track.isMagneticPrimary && state_.magneticTimelineEnabled &&
+                !state_.positionOverrideActive) {
+                TrackClipDelegate::compactTrack(track.clips);
+            }
+            break;
+        }
     }
 
     // Push clips right at insertion point
@@ -746,6 +1013,51 @@ void TimelineNotifier::reorderClipOverwrite(int clipId, int trackIndex, double a
 }
 void TimelineNotifier::splitClipAtPlayhead() { trackClip_->splitClipAtPlayhead(); }
 void TimelineNotifier::rippleDelete(int id)  { trackClip_->rippleDelete(id); }
+
+// Gap management
+void TimelineNotifier::closeTrackGaps(int ti) { trackClip_->closeTrackGaps(ti); syncNativeToProject(); }
+void TimelineNotifier::deleteAllGaps()        { trackClip_->deleteAllGaps(); }
+void TimelineNotifier::closeGapAt(int ti, double gs) { trackClip_->closeGapAt(ti, gs); }
+void TimelineNotifier::insertSlugAt(int ti, double gs, double gd) { trackClip_->insertSlugAt(ti, gs, gd); }
+
+QVariantList TimelineNotifier::detectGaps(int trackIndex) const {
+    QVariantList result;
+    if (!state_.project) return result;
+    const auto& tracks = state_.project->tracks;
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size())) return result;
+    const auto& clips = tracks[trackIndex].clips;
+    if (clips.isEmpty()) return result;
+
+    // Build sorted list of clip intervals
+    QList<std::pair<double, double>> intervals;
+    for (const auto& c : clips)
+        intervals.append({c.timelineIn, c.timelineOut});
+    std::sort(intervals.begin(), intervals.end());
+
+    // Check gap before first clip
+    if (intervals.first().first > 0.01) {
+        QVariantMap gap;
+        gap[QStringLiteral("start")]    = 0.0;
+        gap[QStringLiteral("end")]      = intervals.first().first;
+        gap[QStringLiteral("duration")] = intervals.first().first;
+        result.append(gap);
+    }
+
+    // Check gaps between consecutive clips
+    for (int i = 1; i < intervals.size(); ++i) {
+        double prevEnd = intervals[i - 1].second;
+        double nextStart = intervals[i].first;
+        if (nextStart - prevEnd > 0.01) {
+            QVariantMap gap;
+            gap[QStringLiteral("start")]    = prevEnd;
+            gap[QStringLiteral("end")]      = nextStart;
+            gap[QStringLiteral("duration")] = nextStart - prevEnd;
+            result.append(gap);
+        }
+    }
+    return result;
+}
+
 void TimelineNotifier::selectClip(int id) {
     // Set selectedClipIds BEFORE delegate call so that when setState()
     // emits selectionChanged, QML sees consistent multi-select state
@@ -827,6 +1139,51 @@ void TimelineNotifier::updateEffect(int cid, int et, double v) {
     effectColor_->updateEffect(cid, static_cast<EffectType>(et), v);
 }
 void TimelineNotifier::clearEffects(int cid) { effectColor_->clearEffects(cid); }
+
+void TimelineNotifier::reorderEffect(int clipId, int fromIndex, int toIndex) {
+    if (!state_.project) return;
+    const auto* clip = state_.project->findClip(clipId);
+    if (!clip) return;
+    auto effects = clip->effects;
+    if (fromIndex < 0 || fromIndex >= effects.size() || toIndex < 0 || toIndex >= effects.size()) return;
+    if (fromIndex == toIndex) return;
+    auto before = *state_.project;
+    auto moved = effects.takeAt(fromIndex);
+    effects.insert(toIndex, moved);
+    updateClip(clipId, [&effects](const VideoClip& c) {
+        VideoClip u = c;
+        u.effects = effects;
+        return u;
+    });
+    pushUndo(before);
+    syncEffectsToEngine(clipId);
+}
+
+void TimelineNotifier::copyEffects(int clipId) {
+    if (!state_.project) return;
+    const auto* clip = state_.project->findClip(clipId);
+    if (!clip) return;
+    clipboardEffects_ = clip->effects;
+    clipboardColorGrading_ = clip->colorGrading;
+}
+
+void TimelineNotifier::pasteEffects(int clipId) {
+    if (!state_.project || clipboardEffects_.isEmpty()) return;
+    auto before = *state_.project;
+    updateClip(clipId, [this](const VideoClip& c) {
+        VideoClip u = c;
+        u.effects = clipboardEffects_;
+        u.colorGrading = clipboardColorGrading_;
+        return u;
+    });
+    pushUndo(before);
+    syncEffectsToEngine(clipId);
+}
+
+bool TimelineNotifier::hasClipboardEffects() const {
+    return !clipboardEffects_.isEmpty();
+}
+
 void TimelineNotifier::applyPresetFilter(int cid, int pid) {
     effectColor_->applyPresetFilter(cid, static_cast<PresetFilterId>(pid));
 }
@@ -839,11 +1196,13 @@ void TimelineNotifier::setColorGradingProperty(int clipId, const QString& prop, 
     if (prop == QStringLiteral("brightness"))       cg.brightness  = value;
     else if (prop == QStringLiteral("contrast"))     cg.contrast    = value;
     else if (prop == QStringLiteral("saturation"))   cg.saturation  = value;
+    else if (prop == QStringLiteral("exposure"))     cg.exposure    = value;
     else if (prop == QStringLiteral("temperature"))  cg.temperature = value;
     else if (prop == QStringLiteral("tint"))          cg.tint        = value;
     else if (prop == QStringLiteral("shadows"))       cg.shadows     = value;
     else if (prop == QStringLiteral("highlights"))    cg.highlights  = value;
     else if (prop == QStringLiteral("vibrance"))      cg.vibrance    = value;
+    else if (prop == QStringLiteral("hue"))            cg.hue         = value;
     else if (prop == QStringLiteral("fade"))           cg.fade        = value;
     else if (prop == QStringLiteral("vignette"))       cg.vignette    = value;
     else return;
@@ -853,6 +1212,7 @@ void TimelineNotifier::setClipOpacity(int cid, double o) { effectColor_->setClip
 void TimelineNotifier::setClipBlendMode(int cid, int m)  { effectColor_->setClipBlendMode(cid, m); }
 
 void TimelineNotifier::setTransitionIn(int cid, int tt, double dur, int easing) {
+    qDebug() << "[TimelineNotifier] setTransitionIn: clip=" << cid << "type=" << tt << "dur=" << dur << "easing=" << easing;
     ClipTransition t;
     t.type            = static_cast<TransitionType>(tt);
     t.durationSeconds = dur;
@@ -868,6 +1228,41 @@ void TimelineNotifier::setTransitionOut(int cid, int tt, double dur, int easing)
 }
 void TimelineNotifier::removeTransitionIn(int cid)  { effectColor_->removeTransitionIn(cid); }
 void TimelineNotifier::removeTransitionOut(int cid) { effectColor_->removeTransitionOut(cid); }
+
+void TimelineNotifier::applyDefaultTransition(int clipId) {
+    // Apply Cross Dissolve (type 2) with 0.5s duration as default
+    ClipTransition t;
+    t.type = TransitionType::Dissolve;
+    t.durationSeconds = 0.5;
+    t.easing = EasingCurve::EaseInOut;
+    effectColor_->setTransitionIn(clipId, t);
+}
+
+QVariantList TimelineNotifier::transitionLibrary() const {
+    static const QVariantList lib = {
+        QVariantMap{{QStringLiteral("type"), 1},  {QStringLiteral("name"), QStringLiteral("Fade")},          {QStringLiteral("category"), QStringLiteral("Basic")}},
+        QVariantMap{{QStringLiteral("type"), 2},  {QStringLiteral("name"), QStringLiteral("Cross Dissolve")},{QStringLiteral("category"), QStringLiteral("Basic")}},
+        QVariantMap{{QStringLiteral("type"), 20}, {QStringLiteral("name"), QStringLiteral("Dip to Black")},  {QStringLiteral("category"), QStringLiteral("Basic")}},
+        QVariantMap{{QStringLiteral("type"), 3},  {QStringLiteral("name"), QStringLiteral("Slide Left")},    {QStringLiteral("category"), QStringLiteral("Slide")}},
+        QVariantMap{{QStringLiteral("type"), 4},  {QStringLiteral("name"), QStringLiteral("Slide Right")},   {QStringLiteral("category"), QStringLiteral("Slide")}},
+        QVariantMap{{QStringLiteral("type"), 5},  {QStringLiteral("name"), QStringLiteral("Slide Up")},      {QStringLiteral("category"), QStringLiteral("Slide")}},
+        QVariantMap{{QStringLiteral("type"), 6},  {QStringLiteral("name"), QStringLiteral("Slide Down")},    {QStringLiteral("category"), QStringLiteral("Slide")}},
+        QVariantMap{{QStringLiteral("type"), 7},  {QStringLiteral("name"), QStringLiteral("Wipe Left")},     {QStringLiteral("category"), QStringLiteral("Wipe")}},
+        QVariantMap{{QStringLiteral("type"), 8},  {QStringLiteral("name"), QStringLiteral("Wipe Right")},    {QStringLiteral("category"), QStringLiteral("Wipe")}},
+        QVariantMap{{QStringLiteral("type"), 9},  {QStringLiteral("name"), QStringLiteral("Wipe Up")},       {QStringLiteral("category"), QStringLiteral("Wipe")}},
+        QVariantMap{{QStringLiteral("type"), 10}, {QStringLiteral("name"), QStringLiteral("Wipe Down")},     {QStringLiteral("category"), QStringLiteral("Wipe")}},
+        QVariantMap{{QStringLiteral("type"), 11}, {QStringLiteral("name"), QStringLiteral("Zoom")},          {QStringLiteral("category"), QStringLiteral("Motion")}},
+        QVariantMap{{QStringLiteral("type"), 12}, {QStringLiteral("name"), QStringLiteral("Push")},          {QStringLiteral("category"), QStringLiteral("Motion")}},
+        QVariantMap{{QStringLiteral("type"), 13}, {QStringLiteral("name"), QStringLiteral("Reveal")},        {QStringLiteral("category"), QStringLiteral("Motion")}},
+        QVariantMap{{QStringLiteral("type"), 14}, {QStringLiteral("name"), QStringLiteral("Iris")},          {QStringLiteral("category"), QStringLiteral("Creative")}},
+        QVariantMap{{QStringLiteral("type"), 15}, {QStringLiteral("name"), QStringLiteral("Clock Wipe")},    {QStringLiteral("category"), QStringLiteral("Creative")}},
+        QVariantMap{{QStringLiteral("type"), 16}, {QStringLiteral("name"), QStringLiteral("Blur")},          {QStringLiteral("category"), QStringLiteral("Creative")}},
+        QVariantMap{{QStringLiteral("type"), 17}, {QStringLiteral("name"), QStringLiteral("Glitch")},        {QStringLiteral("category"), QStringLiteral("Creative")}},
+        QVariantMap{{QStringLiteral("type"), 18}, {QStringLiteral("name"), QStringLiteral("Morph")},         {QStringLiteral("category"), QStringLiteral("Creative")}},
+        QVariantMap{{QStringLiteral("type"), 19}, {QStringLiteral("name"), QStringLiteral("Flash")},         {QStringLiteral("category"), QStringLiteral("Creative")}},
+    };
+    return lib;
+}
 
 void TimelineNotifier::addKeyframe(int cid, int prop, double time, double val) {
     keyframeAudio_->addKeyframe(cid, static_cast<KeyframeProperty>(prop),
@@ -890,6 +1285,8 @@ void TimelineNotifier::setTrackPan(int ti, double p)    { keyframeAudio_->setTra
 void TimelineNotifier::setClipSpeed(int cid, double s)  { qDebug() << "[TimelineNotifier] setClipSpeed:" << cid << s; advancedEdit_->setClipSpeed(cid, s); }
 void TimelineNotifier::reverseClip(int cid)              { qDebug() << "[TimelineNotifier] reverseClip:" << cid; advancedEdit_->reverseClip(cid); }
 void TimelineNotifier::freezeFrame(int cid)              { qDebug() << "[TimelineNotifier] freezeFrame:" << cid; advancedEdit_->freezeFrame(cid); }
+void TimelineNotifier::addFreezeFrame(int cid, double d) { advancedEdit_->addFreezeFrame(cid, d, false); }
+void TimelineNotifier::freezeAndExtend(int cid, double d){ advancedEdit_->addFreezeFrame(cid, d, true); }
 void TimelineNotifier::duplicateClip(int cid)            { advancedEdit_->duplicateClip(cid); }
 void TimelineNotifier::rateStretch(int cid, double d)    { advancedEdit_->rateStretch(cid, d); }
 void TimelineNotifier::addMarker() {
@@ -949,6 +1346,608 @@ void TimelineNotifier::toggleWaveformStereo() {
     state_.waveformStereo = !state_.waveformStereo;
     emit stateChanged();
 }
+
+// ---------------------------------------------------------------------------
+// Duplicate Frame Detection
+// ---------------------------------------------------------------------------
+void TimelineNotifier::toggleDuplicateFrameDetection() {
+    state_.showDuplicateFrames = !state_.showDuplicateFrames;
+    emit stateChanged();
+}
+
+QVariantList TimelineNotifier::duplicateFrameOverlaps(int clipId) const {
+    QVariantList result;
+    if (!state_.project) return result;
+
+    // Find the target clip
+    const VideoClip* target = state_.project->findClip(clipId);
+    if (!target) return result;
+
+    // Only video/image/audio clips have meaningful source ranges
+    if (target->sourcePath.isEmpty()) return result;
+
+    // Compare against all other clips on all tracks
+    for (const auto& track : state_.project->tracks) {
+        for (const auto& other : track.clips) {
+            if (other.id == clipId) continue;
+            if (other.sourcePath != target->sourcePath) continue;
+
+            // Check if source frame ranges overlap:
+            // Clip A uses [sourceIn, sourceOut) from source file
+            // Clip B uses [sourceIn, sourceOut) from source file
+            // They overlap if A.sourceIn < B.sourceOut && B.sourceIn < A.sourceOut
+            if (target->sourceIn < other.sourceOut && other.sourceIn < target->sourceOut) {
+                QVariantMap overlap;
+                overlap[QStringLiteral("clipId")] = other.id;
+                overlap[QStringLiteral("displayName")] = other.displayName;
+                overlap[QStringLiteral("trackIndex")] = other.trackIndex;
+                // Overlapping region in source time
+                double overlapStart = std::max(target->sourceIn, other.sourceIn);
+                double overlapEnd = std::min(target->sourceOut, other.sourceOut);
+                overlap[QStringLiteral("overlapStart")] = overlapStart;
+                overlap[QStringLiteral("overlapEnd")] = overlapEnd;
+                overlap[QStringLiteral("overlapDuration")] = overlapEnd - overlapStart;
+                result.append(overlap);
+            }
+        }
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Tabbed / Stacked Timelines
+// ---------------------------------------------------------------------------
+void TimelineNotifier::saveActiveTabState() {
+    if (activeTabIndex_ >= 0 && activeTabIndex_ < timelineTabs_.size()) {
+        timelineTabs_[activeTabIndex_].state = state_;
+        timelineTabs_[activeTabIndex_].engineTimelineId = engineTimelineId_;
+    }
+}
+
+void TimelineNotifier::loadTabState(int tabIndex) {
+    if (tabIndex < 0 || tabIndex >= timelineTabs_.size()) return;
+    state_ = timelineTabs_[tabIndex].state;
+    engineTimelineId_ = timelineTabs_[tabIndex].engineTimelineId;
+
+    // Reset caches so QML re-reads everything
+    cachedTracksGen_ = -1;
+    cachedMarkersGen_ = -1;
+    cachedSelectionGen_ = -1;
+    prevTrackGen_ = -1;
+    prevSelectionGen_ = -1;
+
+    // Emit all signals so QML updates fully
+    emit stateChanged();
+    emit playbackChanged();
+    emit tracksChanged();
+    emit selectionChanged();
+    emit zoomChanged();
+}
+
+QVariantList TimelineNotifier::timelineTabsVariant() const {
+    QVariantList result;
+    for (int i = 0; i < timelineTabs_.size(); ++i) {
+        QVariantMap tab;
+        tab[QStringLiteral("id")] = timelineTabs_[i].id;
+        tab[QStringLiteral("label")] = timelineTabs_[i].label;
+        tab[QStringLiteral("index")] = i;
+        tab[QStringLiteral("isActive")] = (i == activeTabIndex_);
+        tab[QStringLiteral("parentTabIndex")] = timelineTabs_[i].parentTabIndex;
+        tab[QStringLiteral("sourceClipId")] = timelineTabs_[i].sourceClipId;
+        tab[QStringLiteral("isCompound")] = (timelineTabs_[i].parentTabIndex >= 0);
+        result.append(tab);
+    }
+    return result;
+}
+
+QString TimelineNotifier::breadcrumbPath() const {
+    if (timelineTabs_.isEmpty()) return QStringLiteral("Project");
+
+    // Build breadcrumb by walking up the parentTabIndex chain
+    QStringList parts;
+    int idx = activeTabIndex_;
+    while (idx >= 0 && idx < timelineTabs_.size()) {
+        parts.prepend(timelineTabs_[idx].label);
+        idx = timelineTabs_[idx].parentTabIndex;
+    }
+    parts.prepend(QStringLiteral("Project"));
+    return parts.join(QStringLiteral(" > "));
+}
+
+int TimelineNotifier::addTimelineTab(const QString& label) {
+    saveActiveTabState();
+
+    // Create a fresh project for the new tab
+    auto project = std::make_shared<VideoProject>();
+    project->width = 1920;
+    project->height = 1080;
+    project->frameRate = kDefaultFps;
+
+    VideoTrack videoTrack;
+    videoTrack.type = TrackType::Video;
+    videoTrack.index = 0;
+    videoTrack.label = QStringLiteral("Video 1");
+    videoTrack.isMagneticPrimary = true;
+
+    VideoTrack audioTrack;
+    audioTrack.type = TrackType::Audio;
+    audioTrack.index = 1;
+    audioTrack.label = QStringLiteral("Audio 1");
+
+    project->tracks = {videoTrack, audioTrack};
+
+    TimelineTab newTab;
+    newTab.id = nextTabId_++;
+    newTab.label = label.isEmpty()
+        ? QStringLiteral("Timeline %1").arg(timelineTabs_.size() + 1)
+        : label;
+
+    // Create engine timeline for the new tab
+    if (stubEngine_) {
+        rendering::TimelineConfig cfg;
+        cfg.width = project->width;
+        cfg.height = project->height;
+        cfg.frameRate = project->frameRate;
+        newTab.engineTimelineId = stubEngine_->createTimeline(cfg);
+    }
+
+    newTab.state.project = std::move(project);
+    newTab.state.phase = TimelinePhase::ready;
+
+    int newIndex = timelineTabs_.size();
+    timelineTabs_.append(std::move(newTab));
+
+    // Switch to new tab
+    activeTabIndex_ = newIndex;
+    loadTabState(newIndex);
+    emit tabsChanged();
+
+    return newIndex;
+}
+
+void TimelineNotifier::removeTimelineTab(int tabIndex) {
+    if (tabIndex < 0 || tabIndex >= timelineTabs_.size()) return;
+    if (timelineTabs_.size() <= 1) return; // can't remove last tab
+
+    // Destroy engine timeline
+    if (stubEngine_ && timelineTabs_[tabIndex].engineTimelineId >= 0) {
+        stubEngine_->destroyTimeline(timelineTabs_[tabIndex].engineTimelineId);
+    }
+
+    // Remove any child tabs (compound clips opened from this tab)
+    for (int i = timelineTabs_.size() - 1; i >= 0; --i) {
+        if (timelineTabs_[i].parentTabIndex == tabIndex && i != tabIndex) {
+            timelineTabs_.removeAt(i);
+            if (i < tabIndex) tabIndex--;
+            if (activeTabIndex_ >= i) activeTabIndex_ = std::max(0, activeTabIndex_ - 1);
+        }
+    }
+
+    timelineTabs_.removeAt(tabIndex);
+
+    // Fix up parentTabIndex references
+    for (auto& tab : timelineTabs_) {
+        if (tab.parentTabIndex > tabIndex) tab.parentTabIndex--;
+    }
+
+    // Adjust active index
+    if (activeTabIndex_ >= timelineTabs_.size())
+        activeTabIndex_ = timelineTabs_.size() - 1;
+    if (activeTabIndex_ < 0) activeTabIndex_ = 0;
+
+    loadTabState(activeTabIndex_);
+    emit tabsChanged();
+}
+
+void TimelineNotifier::switchTimelineTab(int tabIndex) {
+    if (tabIndex < 0 || tabIndex >= timelineTabs_.size()) return;
+    if (tabIndex == activeTabIndex_) return;
+
+    saveActiveTabState();
+    activeTabIndex_ = tabIndex;
+    loadTabState(tabIndex);
+    emit tabsChanged();
+}
+
+void TimelineNotifier::renameTimelineTab(int tabIndex, const QString& label) {
+    if (tabIndex < 0 || tabIndex >= timelineTabs_.size()) return;
+    timelineTabs_[tabIndex].label = label;
+    emit tabsChanged();
+}
+
+void TimelineNotifier::setStackedView(bool stacked) {
+    if (stackedView_ == stacked) return;
+    stackedView_ = stacked;
+    if (stacked && stackedSecondaryIndex_ < 0 && timelineTabs_.size() > 1) {
+        // Auto-pick the second tab if none selected
+        stackedSecondaryIndex_ = (activeTabIndex_ == 0) ? 1 : 0;
+    }
+    if (!stacked) stackedSecondaryIndex_ = -1;
+    emit tabsChanged();
+}
+
+void TimelineNotifier::setStackedSecondaryIndex(int tabIndex) {
+    if (tabIndex < 0 || tabIndex >= timelineTabs_.size()) return;
+    if (tabIndex == activeTabIndex_) return;
+    stackedSecondaryIndex_ = tabIndex;
+    emit tabsChanged();
+}
+
+void TimelineNotifier::openCompoundClip(int clipId) {
+    if (!state_.project) return;
+
+    const auto* clip = state_.project->findClip(clipId);
+    if (!clip) return;
+
+    saveActiveTabState();
+
+    // Create a new tab for the compound clip
+    TimelineTab newTab;
+    newTab.id = nextTabId_++;
+    newTab.label = QStringLiteral("Compound: %1").arg(clip->displayName);
+    newTab.parentTabIndex = activeTabIndex_;
+    newTab.sourceClipId = clipId;
+
+    // Create a project from the clip's source range
+    auto project = std::make_shared<VideoProject>();
+    project->width = state_.project->width;
+    project->height = state_.project->height;
+    project->frameRate = state_.project->frameRate;
+
+    VideoTrack videoTrack;
+    videoTrack.type = TrackType::Video;
+    videoTrack.index = 0;
+    videoTrack.label = QStringLiteral("Video");
+    videoTrack.isMagneticPrimary = true;
+
+    // Add the clip to the compound timeline at position 0
+    VideoClip compoundClip = *clip;
+    compoundClip.timelineIn = 0.0;
+    compoundClip.timelineOut = clip->duration();
+    videoTrack.clips.append(compoundClip);
+
+    project->tracks = {videoTrack};
+
+    if (stubEngine_) {
+        rendering::TimelineConfig cfg;
+        cfg.width = project->width;
+        cfg.height = project->height;
+        cfg.frameRate = project->frameRate;
+        newTab.engineTimelineId = stubEngine_->createTimeline(cfg);
+    }
+
+    newTab.state.project = std::move(project);
+    newTab.state.phase = TimelinePhase::ready;
+
+    int newIndex = timelineTabs_.size();
+    timelineTabs_.append(std::move(newTab));
+
+    activeTabIndex_ = newIndex;
+    loadTabState(newIndex);
+    emit tabsChanged();
+}
+
+void TimelineNotifier::closeCompoundClip() {
+    if (activeTabIndex_ < 0 || activeTabIndex_ >= timelineTabs_.size()) return;
+    int parentIdx = timelineTabs_[activeTabIndex_].parentTabIndex;
+    if (parentIdx < 0) return; // not a compound clip tab
+
+    // Remove the compound tab and switch back to parent
+    removeTimelineTab(activeTabIndex_);
+    // After removal, parent index may have shifted
+    if (parentIdx < timelineTabs_.size()) {
+        switchTimelineTab(parentIdx);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Secondary Timeline Accessors (Stacked View)
+// ---------------------------------------------------------------------------
+
+const TimelineState* TimelineNotifier::secondaryState() const {
+    if (!stackedView_ || stackedSecondaryIndex_ < 0
+        || stackedSecondaryIndex_ >= timelineTabs_.size())
+        return nullptr;
+    return &timelineTabs_[stackedSecondaryIndex_].state;
+}
+
+QVariantList TimelineNotifier::secondaryTracksVariant() const {
+    auto* sec = secondaryState();
+    if (!sec || !sec->project) {
+        cachedSecondaryTracksGen_ = -1;
+        cachedSecondaryTracks_.clear();
+        return cachedSecondaryTracks_;
+    }
+    if (cachedSecondaryTracksGen_ == sec->trackGeneration)
+        return cachedSecondaryTracks_;
+    cachedSecondaryTracksGen_ = sec->trackGeneration;
+    cachedSecondaryTracks_.clear();
+    for (const auto& track : sec->project->tracks) {
+        QVariantMap m;
+        m[QStringLiteral("index")] = track.index;
+        m[QStringLiteral("label")] = track.label;
+        m[QStringLiteral("type")] = static_cast<int>(track.type);
+        m[QStringLiteral("isVisible")] = track.isVisible;
+        m[QStringLiteral("isLocked")] = track.isLocked;
+        m[QStringLiteral("isMuted")] = track.isMuted;
+        m[QStringLiteral("clipCount")] = track.clips.size();
+        m[QStringLiteral("trackHeight")] = track.trackHeight;
+        // Include clip data inline for simplified secondary rendering
+        QVariantList clipList;
+        for (const auto& clip : track.clips) {
+            QVariantMap cm;
+            cm[QStringLiteral("clipId")] = clip.id;
+            cm[QStringLiteral("displayName")] = clip.displayName;
+            cm[QStringLiteral("timelineIn")] = clip.timelineIn;
+            cm[QStringLiteral("timelineOut")] = clip.timelineOut;
+            cm[QStringLiteral("duration")] = clip.duration();
+            cm[QStringLiteral("sourceType")] = static_cast<int>(clip.sourceType);
+            cm[QStringLiteral("colorTag")] = clip.colorTag.value_or(QString());
+            clipList.append(cm);
+        }
+        m[QStringLiteral("clips")] = clipList;
+        cachedSecondaryTracks_.append(m);
+    }
+    return cachedSecondaryTracks_;
+}
+
+int TimelineNotifier::secondaryTrackCount() const {
+    auto* sec = secondaryState();
+    return (sec && sec->project) ? sec->project->tracks.size() : 0;
+}
+
+double TimelineNotifier::secondaryPixelsPerSecond() const {
+    auto* sec = secondaryState();
+    return sec ? sec->pixelsPerSecond : 80.0;
+}
+
+double TimelineNotifier::secondaryScrollOffset() const {
+    auto* sec = secondaryState();
+    return sec ? sec->scrollOffset : 0.0;
+}
+
+double TimelineNotifier::secondaryTotalDuration() const {
+    auto* sec = secondaryState();
+    return (sec && sec->project) ? sec->project->duration() : 0.0;
+}
+
+double TimelineNotifier::secondaryPosition() const {
+    auto* sec = secondaryState();
+    return sec ? sec->playback.positionSeconds : 0.0;
+}
+
+QString TimelineNotifier::secondaryTabLabel() const {
+    if (!stackedView_ || stackedSecondaryIndex_ < 0
+        || stackedSecondaryIndex_ >= timelineTabs_.size())
+        return {};
+    return timelineTabs_[stackedSecondaryIndex_].label;
+}
+
+void TimelineNotifier::swapActiveAndSecondary() {
+    if (!stackedView_ || stackedSecondaryIndex_ < 0
+        || stackedSecondaryIndex_ >= timelineTabs_.size())
+        return;
+    if (stackedSecondaryIndex_ == activeTabIndex_) return;
+
+    saveActiveTabState();
+    std::swap(activeTabIndex_, stackedSecondaryIndex_);
+    loadTabState(activeTabIndex_);
+
+    // Invalidate secondary cache
+    cachedSecondaryTracksGen_ = -1;
+
+    emit tabsChanged();
+}
+
+void TimelineNotifier::setSecondaryPixelsPerSecond(double pps) {
+    if (stackedSecondaryIndex_ < 0 || stackedSecondaryIndex_ >= timelineTabs_.size()) return;
+    pps = std::max(0.01, std::min(400.0, pps));
+    timelineTabs_[stackedSecondaryIndex_].state.pixelsPerSecond = pps;
+    emit tabsChanged();
+}
+
+void TimelineNotifier::setSecondaryScrollOffset(double offset) {
+    if (stackedSecondaryIndex_ < 0 || stackedSecondaryIndex_ >= timelineTabs_.size()) return;
+    timelineTabs_[stackedSecondaryIndex_].state.scrollOffset = std::max(0.0, offset);
+    emit tabsChanged();
+}
+
+void TimelineNotifier::moveClipToSecondaryTimeline(int clipId, int toTrack, double toTime) {
+    if (!stackedView_ || stackedSecondaryIndex_ < 0
+        || stackedSecondaryIndex_ >= timelineTabs_.size())
+        return;
+
+    saveActiveTabState();
+
+    auto& srcState = timelineTabs_[activeTabIndex_].state;
+    auto& dstState = timelineTabs_[stackedSecondaryIndex_].state;
+    if (!srcState.project || !dstState.project) return;
+
+    auto srcBefore = *srcState.project;
+
+    // Find and remove clip from source
+    VideoClip moving;
+    bool found = false;
+    for (auto& track : srcState.project->tracks) {
+        auto it = std::find_if(track.clips.begin(), track.clips.end(),
+            [clipId](const VideoClip& c) { return c.id == clipId; });
+        if (it != track.clips.end()) {
+            moving = *it;
+            track.clips.erase(it);
+            found = true;
+            break;
+        }
+    }
+    if (!found) return;
+
+    // Update clip position
+    double dur = moving.duration();
+    moving.timelineIn = std::max(0.0, toTime);
+    moving.timelineOut = moving.timelineIn + dur;
+
+    // Ensure target track exists in destination
+    toTrack = std::max(0, toTrack);
+    while (toTrack >= static_cast<int>(dstState.project->tracks.size())) {
+        VideoTrack newTrack;
+        newTrack.index = dstState.project->tracks.size();
+        newTrack.type = TrackType::Video;
+        newTrack.label = QStringLiteral("Track %1").arg(newTrack.index + 1);
+        dstState.project->tracks.append(newTrack);
+    }
+
+    moving.trackIndex = toTrack;
+    dstState.project->tracks[toTrack].clips.append(moving);
+
+    // Sort clips by timelineIn
+    std::sort(dstState.project->tracks[toTrack].clips.begin(),
+              dstState.project->tracks[toTrack].clips.end(),
+              [](const VideoClip& a, const VideoClip& b) { return a.timelineIn < b.timelineIn; });
+
+    // Bump track generations
+    srcState.trackGeneration++;
+    dstState.trackGeneration++;
+
+    // Deselect the moved clip in source
+    if (srcState.selectedClipId == clipId) {
+        srcState.selectedClipId.reset();
+        srcState.selectedClipIds.remove(clipId);
+        srcState.selectionGeneration++;
+    }
+
+    // Reload active state
+    state_ = srcState;
+
+    // Push undo for active project
+    pushUndo(srcBefore);
+
+    // Invalidate caches
+    cachedTracksGen_ = -1;
+    cachedSecondaryTracksGen_ = -1;
+
+    emit tracksChanged();
+    emit selectionChanged();
+    emit tabsChanged();
+}
+
+// ---------------------------------------------------------------------------
+// Razor / Blade Tool
+// ---------------------------------------------------------------------------
+void TimelineNotifier::setRazorMode(bool enabled) {
+    if (state_.razorModeEnabled == enabled) return;
+    state_.razorModeEnabled = enabled;
+    // Deactivate trim edit mode when entering razor mode
+    if (enabled && state_.trimEditMode != TrimEditMode::Normal) {
+        state_.trimEditMode = TrimEditMode::Normal;
+        state_.rippleMode = false;
+    }
+    emit stateChanged();
+}
+
+void TimelineNotifier::toggleRazorMode() {
+    setRazorMode(!state_.razorModeEnabled);
+}
+
+void TimelineNotifier::splitClipAtPosition(int clipId, double timelinePosition) {
+    trackClip_->splitClipAtPosition(clipId, timelinePosition);
+}
+
+void TimelineNotifier::splitAllAtPosition(double timelinePosition) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    bool anySplit = false;
+
+    for (auto& track : state_.project->tracks) {
+        if (track.isLocked) continue;
+        for (int i = 0; i < static_cast<int>(track.clips.size()); ++i) {
+            auto& clip = track.clips[i];
+            if (timelinePosition > clip.timelineIn + 0.001 &&
+                timelinePosition < clip.timelineOut - 0.001) {
+                const double timelineElapsed = timelinePosition - clip.timelineIn;
+                const double sourceElapsed   = timelineElapsed * clip.speed;
+
+                VideoClip secondHalf    = clip;
+                secondHalf.id           = trackClip_->nextClipId();
+                secondHalf.timelineIn   = timelinePosition;
+                secondHalf.sourceIn     = clip.sourceIn + sourceElapsed;
+
+                clip.timelineOut = timelinePosition;
+                clip.sourceOut   = clip.sourceIn + sourceElapsed;
+
+                track.clips.insert(track.clips.begin() + i + 1, std::move(secondHalf));
+                anySplit = true;
+                break; // only one clip per track can be at this position
+            }
+        }
+    }
+
+    if (anySplit) {
+        state_.trackGeneration++;
+        setState(std::move(state_));
+        pushUndo(before);
+        syncNativeToProject();
+        debouncedRenderFrame();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Disabled / Muted Clips
+// ---------------------------------------------------------------------------
+void TimelineNotifier::toggleClipDisabled(int clipId) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    updateClip(clipId, [](const VideoClip& c) {
+        return c.copyWith({.isDisabled = !c.isDisabled});
+    });
+    pushUndo(before);
+}
+
+bool TimelineNotifier::isClipDisabled(int clipId) const {
+    if (!state_.project) return false;
+    const auto* clip = state_.project->findClip(clipId);
+    return clip ? clip->isDisabled : false;
+}
+
+// ---------------------------------------------------------------------------
+// Magnetic Timeline (FCP-style)
+// ---------------------------------------------------------------------------
+void TimelineNotifier::toggleMagneticTimeline() {
+    state_.magneticTimelineEnabled = !state_.magneticTimelineEnabled;
+    setState(std::move(state_));
+}
+
+void TimelineNotifier::setPositionOverride(bool active) {
+    if (state_.positionOverrideActive == active) return;
+    state_.positionOverrideActive = active;
+    setState(std::move(state_));
+}
+
+void TimelineNotifier::connectClipToPrimary(int connectedClipId, int primaryClipId, double syncOffset) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    // updateClip() already bumps trackGeneration and calls setState()
+    updateClip(connectedClipId, [primaryClipId, syncOffset](const VideoClip& c) {
+        return c.copyWith({.connectedToPrimaryClipId = primaryClipId,
+                           .syncPointOffset = syncOffset});
+    });
+    pushUndo(before);
+}
+
+void TimelineNotifier::disconnectClip(int clipId) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    // updateClip() already bumps trackGeneration and calls setState()
+    updateClip(clipId, [](const VideoClip& c) {
+        return c.copyWith({.clearConnectedToPrimaryClipId = true});
+    });
+    pushUndo(before);
+}
+
+bool TimelineNotifier::isTrackMagneticPrimary(int trackIndex) const {
+    if (!state_.project) return false;
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(state_.project->tracks.size())) return false;
+    return state_.project->tracks[trackIndex].isMagneticPrimary;
+}
+
 void TimelineNotifier::applySpeedRamp(int clipId, int presetIndex) {
     qDebug() << "[TimelineNotifier] applySpeedRamp: clipId=" << clipId << "presetIndex=" << presetIndex;
     auto presets = AdvancedEditDelegate::speedRampPresets();
@@ -1005,6 +2004,39 @@ QVariantList TimelineNotifier::clipSpeedRampPoints(int clipId) const {
     return result;
 }
 
+QVariantList TimelineNotifier::clipVolumeKeyframes(int clipId) const {
+    QVariantList result;
+    if (!state_.project) return result;
+    const auto* clip = state_.project->findClip(clipId);
+    if (!clip) return result;
+    const auto* volTrack = clip->keyframes.trackFor(KeyframeProperty::Volume);
+    if (!volTrack) return result;
+    double dur = clip->duration();
+    for (const auto& kf : volTrack->keyframes) {
+        QVariantMap pt;
+        pt[QStringLiteral("time")] = kf.time;
+        pt[QStringLiteral("normalizedTime")] = dur > 0 ? kf.time / dur : 0.0;
+        pt[QStringLiteral("value")] = kf.value;
+        pt[QStringLiteral("interpolation")] = static_cast<int>(kf.interpolation);
+        result.append(pt);
+    }
+    return result;
+}
+
+void TimelineNotifier::moveVolumeKeyframe(int clipId, double oldTime, double newTime, double newValue) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    newValue = std::max(0.0, std::min(2.0, newValue));
+    newTime = std::max(0.0, newTime);
+    keyframeAudio_->removeKeyframe(clipId, KeyframeProperty::Volume, oldTime);
+    Keyframe kf;
+    kf.time = newTime;
+    kf.value = newValue;
+    kf.interpolation = KeyframeInterpolation::Linear;
+    keyframeAudio_->addKeyframe(clipId, KeyframeProperty::Volume, kf);
+    keyframeAudio_->commitKeyframe(clipId, before);
+}
+
 QVariantMap TimelineNotifier::clipColorGrading(int clipId) const {
     QVariantMap result;
     if (!state_.project) return result;
@@ -1014,11 +2046,13 @@ QVariantMap TimelineNotifier::clipColorGrading(int clipId) const {
     result[QStringLiteral("brightness")]  = cg.brightness;
     result[QStringLiteral("contrast")]    = cg.contrast;
     result[QStringLiteral("saturation")]  = cg.saturation;
+    result[QStringLiteral("exposure")]    = cg.exposure;
     result[QStringLiteral("temperature")] = cg.temperature;
     result[QStringLiteral("tint")]        = cg.tint;
     result[QStringLiteral("shadows")]     = cg.shadows;
     result[QStringLiteral("highlights")]  = cg.highlights;
     result[QStringLiteral("vibrance")]    = cg.vibrance;
+    result[QStringLiteral("hue")]         = cg.hue;
     result[QStringLiteral("fade")]        = cg.fade;
     result[QStringLiteral("vignette")]    = cg.vignette;
     return result;
@@ -1131,6 +2165,40 @@ void TimelineNotifier::redo() {
 // Clip audio property accessors
 // ---------------------------------------------------------------------------
 
+QVariantMap TimelineNotifier::clipColorGradingMap() const {
+    auto* clip = state_.selectedClip();
+    if (!clip) return {};
+    const auto& cg = clip->colorGrading;
+    return {
+        {QStringLiteral("brightness"),  cg.brightness},
+        {QStringLiteral("contrast"),    cg.contrast},
+        {QStringLiteral("saturation"),  cg.saturation},
+        {QStringLiteral("exposure"),    cg.exposure},
+        {QStringLiteral("temperature"), cg.temperature},
+        {QStringLiteral("tint"),        cg.tint},
+        {QStringLiteral("shadows"),     cg.shadows},
+        {QStringLiteral("highlights"),  cg.highlights},
+        {QStringLiteral("vibrance"),    cg.vibrance},
+        {QStringLiteral("hue"),         cg.hue},
+        {QStringLiteral("fade"),        cg.fade},
+        {QStringLiteral("vignette"),    cg.vignette},
+    };
+}
+
+QVariantList TimelineNotifier::clipEffectsList() const {
+    auto* clip = state_.selectedClip();
+    if (!clip) return {};
+    QVariantList result;
+    for (const auto& fx : clip->effects) {
+        QVariantMap m;
+        m[QStringLiteral("type")]    = static_cast<int>(fx.type);
+        m[QStringLiteral("value")]   = fx.value;
+        m[QStringLiteral("enabled")] = fx.enabled;
+        result.append(m);
+    }
+    return result;
+}
+
 double TimelineNotifier::clipVolume() const {
     auto* clip = state_.selectedClip();
     return clip ? clip->audio.volume : 1.0;
@@ -1179,6 +2247,8 @@ QVariantList TimelineNotifier::tracksVariant() const {
         m[QStringLiteral("volume")] = track.audioSettings.volume;
         m[QStringLiteral("pan")] = track.audioSettings.pan;
         m[QStringLiteral("clipCount")] = track.clips.size();
+        m[QStringLiteral("trackHeight")] = track.trackHeight;
+        m[QStringLiteral("isMagneticPrimary")] = track.isMagneticPrimary;
         cachedTracks_.append(m);
     }
     return cachedTracks_;
@@ -1247,6 +2317,7 @@ QVariantMap TimelineNotifier::selectedClipVariant() const {
                 cachedSelectedClip_[QStringLiteral("blendMode")]   = clip.blendMode;
                 cachedSelectedClip_[QStringLiteral("sourceIn")]    = clip.sourceIn;
                 cachedSelectedClip_[QStringLiteral("sourceOut")]   = clip.sourceOut;
+                cachedSelectedClip_[QStringLiteral("connectedToPrimaryClipId")] = clip.connectedToPrimaryClipId.value_or(-1);
                 return cachedSelectedClip_;
             }
         }
@@ -1264,6 +2335,7 @@ QString TimelineNotifier::activeClipSource() const {
     // Search from lowest track index (topmost visually) for a video/image clip
     for (const auto& track : state_.project->tracks) {
         for (const auto& clip : track.clips) {
+            if (clip.isDisabled) continue;  // skip disabled clips during playback
             if (clip.sourceType == ClipSourceType::Video ||
                 clip.sourceType == ClipSourceType::Image) {
                 if (pos >= clip.timelineIn - 0.001 && pos < clip.timelineOut + 0.001) {
@@ -1280,6 +2352,7 @@ double TimelineNotifier::activeClipOffset() const {
     double pos = state_.playback.positionSeconds;
     for (const auto& track : state_.project->tracks) {
         for (const auto& clip : track.clips) {
+            if (clip.isDisabled) continue;  // skip disabled clips during playback
             if (clip.sourceType == ClipSourceType::Video ||
                 clip.sourceType == ClipSourceType::Image) {
                 if (pos >= clip.timelineIn - 0.001 && pos < clip.timelineOut + 0.001) {
@@ -1298,6 +2371,7 @@ QString TimelineNotifier::activeAudioSource() const {
     for (const auto& track : state_.project->tracks) {
         if (track.type != TrackType::Audio) continue;
         for (const auto& clip : track.clips) {
+            if (clip.isDisabled) continue;  // skip disabled clips during playback
             if (clip.sourceType == ClipSourceType::Audio) {
                 if (pos >= clip.timelineIn - 0.001 && pos < clip.timelineOut + 0.001) {
                     return clip.sourcePath;
@@ -1314,6 +2388,7 @@ double TimelineNotifier::activeAudioOffset() const {
     for (const auto& track : state_.project->tracks) {
         if (track.type != TrackType::Audio) continue;
         for (const auto& clip : track.clips) {
+            if (clip.isDisabled) continue;  // skip disabled clips during playback
             if (clip.sourceType == ClipSourceType::Audio) {
                 if (pos >= clip.timelineIn - 0.001 && pos < clip.timelineOut + 0.001) {
                     double relTime = pos - clip.timelineIn;
@@ -1334,6 +2409,7 @@ double TimelineNotifier::activeClipSpeed() const {
     double pos = state_.playback.positionSeconds;
     for (const auto& track : state_.project->tracks) {
         for (const auto& clip : track.clips) {
+            if (clip.isDisabled) continue;  // skip disabled clips during playback
             if (clip.sourceType == ClipSourceType::Video ||
                 clip.sourceType == ClipSourceType::Image) {
                 if (pos >= clip.timelineIn - 0.001 && pos < clip.timelineOut + 0.001) {
@@ -1357,6 +2433,7 @@ bool TimelineNotifier::activeClipReversed() const {
     double pos = state_.playback.positionSeconds;
     for (const auto& track : state_.project->tracks) {
         for (const auto& clip : track.clips) {
+            if (clip.isDisabled) continue;  // skip disabled clips during playback
             if (clip.sourceType == ClipSourceType::Video ||
                 clip.sourceType == ClipSourceType::Image) {
                 if (pos >= clip.timelineIn - 0.001 && pos < clip.timelineOut + 0.001) {
@@ -1373,6 +2450,7 @@ double TimelineNotifier::activeClipVolume() const {
     double pos = state_.playback.positionSeconds;
     for (const auto& track : state_.project->tracks) {
         for (const auto& clip : track.clips) {
+            if (clip.isDisabled) continue;  // skip disabled clips during playback
             if (clip.sourceType == ClipSourceType::Video ||
                 clip.sourceType == ClipSourceType::Image) {
                 if (pos >= clip.timelineIn - 0.001 && pos < clip.timelineOut + 0.001) {
@@ -1387,12 +2465,20 @@ double TimelineNotifier::activeClipVolume() const {
 
 bool TimelineNotifier::activeClipMuted() const {
     if (!state_.project) return false;
+    // Check if any track is soloed
+    bool anySolo = false;
+    for (const auto& t : state_.project->tracks)
+        if (t.isSolo) { anySolo = true; break; }
+
     double pos = state_.playback.positionSeconds;
     for (const auto& track : state_.project->tracks) {
         for (const auto& clip : track.clips) {
+            if (clip.isDisabled) continue;  // skip disabled clips during playback
             if (clip.sourceType == ClipSourceType::Video ||
                 clip.sourceType == ClipSourceType::Image) {
                 if (pos >= clip.timelineIn - 0.001 && pos < clip.timelineOut + 0.001) {
+                    // Solo logic: if any track is soloed, mute tracks that aren't soloed
+                    if (anySolo && !track.isSolo) return true;
                     return clip.audio.isMuted || track.isMuted;
                 }
             }
@@ -1407,6 +2493,7 @@ double TimelineNotifier::activeAudioVolume() const {
     for (const auto& track : state_.project->tracks) {
         if (track.type != TrackType::Audio) continue;
         for (const auto& clip : track.clips) {
+            if (clip.isDisabled) continue;  // skip disabled clips during playback
             if (clip.sourceType == ClipSourceType::Audio) {
                 if (pos >= clip.timelineIn - 0.001 && pos < clip.timelineOut + 0.001) {
                     double vol = clip.audio.volume * track.audioSettings.volume;
@@ -1420,12 +2507,20 @@ double TimelineNotifier::activeAudioVolume() const {
 
 bool TimelineNotifier::activeAudioMuted() const {
     if (!state_.project) return false;
+    // Check if any track is soloed
+    bool anySolo = false;
+    for (const auto& t : state_.project->tracks)
+        if (t.isSolo) { anySolo = true; break; }
+
     double pos = state_.playback.positionSeconds;
     for (const auto& track : state_.project->tracks) {
         if (track.type != TrackType::Audio) continue;
         for (const auto& clip : track.clips) {
+            if (clip.isDisabled) continue;  // skip disabled clips during playback
             if (clip.sourceType == ClipSourceType::Audio) {
                 if (pos >= clip.timelineIn - 0.001 && pos < clip.timelineOut + 0.001) {
+                    // Solo logic: if any track is soloed, mute tracks that aren't soloed
+                    if (anySolo && !track.isSolo) return true;
                     return clip.audio.isMuted || track.isMuted;
                 }
             }
@@ -1606,6 +2701,151 @@ void TimelineNotifier::linkClips(int clipAId, int clipBId) {
     pushUndo(before);
 }
 
+// ---------------------------------------------------------------------------
+// Detach / Reattach Audio
+// ---------------------------------------------------------------------------
+
+bool TimelineNotifier::canDetachAudio(int clipId) const {
+    if (!state_.project) return false;
+    const auto* clip = state_.project->findClip(clipId);
+    if (!clip) return false;
+    if (clip->sourceType != ClipSourceType::Video) return false;
+    if (clip->sourcePath.isEmpty()) return false;
+    if (clip->linkedClipId.has_value()) return false;  // already linked/detached
+    if (clip->audio.isMuted) return false;              // already detached
+    return true;
+}
+
+bool TimelineNotifier::canReattachAudio(int clipId) const {
+    if (!state_.project) return false;
+    const auto* clip = state_.project->findClip(clipId);
+    if (!clip) return false;
+    if (!clip->linkedClipId.has_value()) return false;
+    int linkedId = *clip->linkedClipId;
+    const auto* linked = state_.project->findClip(linkedId);
+    if (!linked) return false;
+    // One must be Video, the other Audio
+    return (clip->sourceType == ClipSourceType::Video && linked->sourceType == ClipSourceType::Audio)
+        || (clip->sourceType == ClipSourceType::Audio && linked->sourceType == ClipSourceType::Video);
+}
+
+void TimelineNotifier::detachAudio(int clipId) {
+    if (!state_.project) return;
+    if (!canDetachAudio(clipId)) return;
+    auto before = *state_.project;
+
+    auto* videoClip = const_cast<VideoClip*>(state_.project->findClip(clipId));
+    if (!videoClip) return;
+
+    // Find the video clip's track index
+    int videoTrackIdx = videoClip->trackIndex;
+
+    // Find or create an audio track below the video track
+    int audioTrackIdx = -1;
+    for (int i = videoTrackIdx + 1; i < state_.project->tracks.size(); ++i) {
+        if (state_.project->tracks[i].type == TrackType::Audio) {
+            audioTrackIdx = i;
+            break;
+        }
+    }
+    if (audioTrackIdx < 0) {
+        // Create a new audio track
+        VideoTrack newTrack;
+        newTrack.index = state_.project->tracks.size();
+        newTrack.type = TrackType::Audio;
+        newTrack.label = QStringLiteral("Audio %1").arg(newTrack.index + 1);
+        state_.project->tracks.append(newTrack);
+        audioTrackIdx = newTrack.index;
+    }
+
+    // Generate new clip ID
+    int maxId = 0;
+    for (const auto& t : state_.project->tracks)
+        for (const auto& c : t.clips)
+            maxId = std::max(maxId, c.id);
+    int audioClipId = maxId + 1;
+
+    // Create the audio clip mirroring the video clip
+    VideoClip audioClip;
+    audioClip.id = audioClipId;
+    audioClip.trackIndex = audioTrackIdx;
+    audioClip.sourceType = ClipSourceType::Audio;
+    audioClip.sourcePath = videoClip->sourcePath;
+    audioClip.displayName = videoClip->displayName + QStringLiteral(" (Audio)");
+    audioClip.timelineIn = videoClip->timelineIn;
+    audioClip.timelineOut = videoClip->timelineOut;
+    audioClip.sourceIn = videoClip->sourceIn;
+    audioClip.sourceOut = videoClip->sourceOut;
+    audioClip.sourceDuration = videoClip->sourceDuration;
+    audioClip.speed = videoClip->speed;
+    audioClip.isReversed = videoClip->isReversed;
+    audioClip.audio = videoClip->audio;  // copy volume/pan/fade settings
+    audioClip.linkedClipId = clipId;     // link back to video
+
+    // Insert audio clip into the audio track (sorted by timelineIn)
+    auto& audioTrack = state_.project->tracks[audioTrackIdx];
+    audioTrack.clips.append(audioClip);
+    std::sort(audioTrack.clips.begin(), audioTrack.clips.end(),
+              [](const VideoClip& a, const VideoClip& b) { return a.timelineIn < b.timelineIn; });
+
+    // Link video to audio and mute video's embedded audio
+    // Re-find videoClip since we may have moved memory
+    for (auto& t : state_.project->tracks) {
+        for (auto& c : t.clips) {
+            if (c.id == clipId) {
+                c.linkedClipId = audioClipId;
+                c.audio.isMuted = true;
+                break;
+            }
+        }
+    }
+
+    state_.trackGeneration++;
+    setState(std::move(state_));
+    pushUndo(before);
+}
+
+void TimelineNotifier::reattachAudio(int clipId) {
+    if (!state_.project) return;
+    if (!canReattachAudio(clipId)) return;
+    auto before = *state_.project;
+
+    const auto* clip = state_.project->findClip(clipId);
+    if (!clip || !clip->linkedClipId.has_value()) return;
+    int linkedId = *clip->linkedClipId;
+
+    // Determine which is video and which is audio
+    int videoId = clipId, audioId = linkedId;
+    if (clip->sourceType == ClipSourceType::Audio) {
+        videoId = linkedId;
+        audioId = clipId;
+    }
+
+    // Unmute video clip's audio and clear link
+    for (auto& t : state_.project->tracks) {
+        for (auto& c : t.clips) {
+            if (c.id == videoId) {
+                c.audio.isMuted = false;
+                c.linkedClipId.reset();
+            }
+        }
+    }
+
+    // Remove the audio clip
+    for (auto& t : state_.project->tracks) {
+        auto it = std::find_if(t.clips.begin(), t.clips.end(),
+            [audioId](const VideoClip& c) { return c.id == audioId; });
+        if (it != t.clips.end()) {
+            t.clips.erase(it);
+            break;
+        }
+    }
+
+    state_.trackGeneration++;
+    setState(std::move(state_));
+    pushUndo(before);
+}
+
 void TimelineNotifier::unlinkClip(int clipId) {
     if (!state_.project) return;
     auto before = *state_.project;
@@ -1667,6 +2907,10 @@ void TimelineNotifier::splitAllAtPlayhead() {
     auto before = *state_.project;
     bool anySplit = false;
 
+    // Collect new clip IDs for incremental engine sync
+    QList<int> newClipIds;
+    QList<int> modifiedClipIds;
+
     for (auto& track : state_.project->tracks) {
         if (track.isLocked) continue;
         for (int i = 0; i < static_cast<int>(track.clips.size()); ++i) {
@@ -1679,6 +2923,9 @@ void TimelineNotifier::splitAllAtPlayhead() {
                 secondHalf.id           = trackClip_->nextClipId();
                 secondHalf.timelineIn   = pos;
                 secondHalf.sourceIn     = clip.sourceIn + sourceElapsed;
+
+                modifiedClipIds.append(clip.id);
+                newClipIds.append(secondHalf.id);
 
                 clip.timelineOut = pos;
                 clip.sourceOut   = clip.sourceIn + sourceElapsed;
@@ -1695,7 +2942,7 @@ void TimelineNotifier::splitAllAtPlayhead() {
         setState(std::move(state_));
         pushUndo(before);
         syncNativeToProject();
-        renderCurrentFrame();
+        debouncedRenderFrame();
     }
 }
 
@@ -1840,6 +3087,471 @@ void TimelineNotifier::deleteSelectedClips() {
     syncNativeToProject();
 }
 
+// ---------------------------------------------------------------------------
+// Clip Clipboard (cut/copy/paste)
+// ---------------------------------------------------------------------------
+void TimelineNotifier::cutSelectedClips() {
+    if (!state_.project || state_.selectedClipIds.isEmpty()) return;
+    clipboardClips_.clear();
+    clipboardIsCut_ = true;
+
+    // Find the earliest timelineIn among selected clips (used as paste offset base)
+    double minTime = 1e18;
+    for (const auto& track : state_.project->tracks) {
+        for (const auto& clip : track.clips) {
+            if (state_.selectedClipIds.contains(clip.id)) {
+                clipboardClips_.append(clip);
+                if (clip.timelineIn < minTime) minTime = clip.timelineIn;
+            }
+        }
+    }
+    // Normalize clipboard clip positions relative to earliest clip
+    for (auto& clip : clipboardClips_) {
+        double dur = clip.duration();
+        clip.timelineIn -= minTime;
+        clip.timelineOut = clip.timelineIn + dur;
+    }
+
+    // Remove the clips from timeline
+    auto before = *state_.project;
+    for (auto& track : state_.project->tracks) {
+        if (track.isLocked) continue;
+        QList<VideoClip> kept;
+        for (const auto& clip : track.clips) {
+            if (!state_.selectedClipIds.contains(clip.id))
+                kept.push_back(clip);
+        }
+        track.clips = kept;
+    }
+    state_.selectedClipIds.clear();
+    state_.selectedClipId.reset();
+    state_.trackGeneration++;
+    state_.selectionGeneration++;
+    setState(std::move(state_));
+    pushUndo(before);
+    syncNativeToProject();
+}
+
+void TimelineNotifier::copySelectedClips() {
+    if (!state_.project || state_.selectedClipIds.isEmpty()) return;
+    clipboardClips_.clear();
+    clipboardIsCut_ = false;
+
+    double minTime = 1e18;
+    for (const auto& track : state_.project->tracks) {
+        for (const auto& clip : track.clips) {
+            if (state_.selectedClipIds.contains(clip.id)) {
+                clipboardClips_.append(clip);
+                if (clip.timelineIn < minTime) minTime = clip.timelineIn;
+            }
+        }
+    }
+    // Normalize positions relative to earliest clip
+    for (auto& clip : clipboardClips_) {
+        double dur = clip.duration();
+        clip.timelineIn -= minTime;
+        clip.timelineOut = clip.timelineIn + dur;
+    }
+}
+
+void TimelineNotifier::pasteClipsAtPlayhead() {
+    if (!state_.project || clipboardClips_.isEmpty()) return;
+    auto before = *state_.project;
+    double pasteTime = state_.playback.positionSeconds;
+
+    // Build a map of how much space each track needs for pasted clips.
+    // We push existing clips right per-track by the span of pasted clips on that track.
+    QHash<int, double> trackPasteSpan; // trackIndex -> max (pasteEnd - pasteTime)
+    for (const auto& srcClip : clipboardClips_) {
+        int targetTrack = srcClip.trackIndex;
+        if (targetTrack < 0 || targetTrack >= static_cast<int>(state_.project->tracks.size()))
+            targetTrack = 0;
+        double clipEnd = pasteTime + srcClip.timelineIn + srcClip.duration();
+        double span = clipEnd - pasteTime;
+        if (span > trackPasteSpan.value(targetTrack, 0.0))
+            trackPasteSpan[targetTrack] = span;
+    }
+
+    // Push existing clips right on each affected track
+    constexpr double kTolerance = 0.01;
+    for (auto it = trackPasteSpan.cbegin(); it != trackPasteSpan.cend(); ++it) {
+        int trackIdx = it.key();
+        double span = it.value();
+        if (trackIdx < 0 || trackIdx >= static_cast<int>(state_.project->tracks.size()))
+            continue;
+        auto& track = state_.project->tracks[trackIdx];
+        if (track.isLocked) continue;
+        for (auto& clip : track.clips) {
+            // Shift clips that start at or after the paste point
+            if (clip.timelineIn >= pasteTime - kTolerance) {
+                double dur = clip.duration();
+                clip.timelineIn += span;
+                clip.timelineOut = clip.timelineIn + dur;
+            }
+            // Split clips that straddle the paste point: handled by
+            // shifting only clips whose start >= pasteTime. Clips that
+            // merely overlap (start before, end after) keep their position
+            // and the pasted clip will sit after them once the downstream
+            // clips have been pushed.
+        }
+    }
+
+    // Insert pasted clips
+    state_.selectedClipIds.clear();
+    for (const auto& srcClip : clipboardClips_) {
+        int targetTrack = srcClip.trackIndex;
+        if (targetTrack < 0 || targetTrack >= static_cast<int>(state_.project->tracks.size()))
+            targetTrack = 0;
+
+        VideoClip newClip = srcClip;
+        newClip.id = trackClip_->nextClipId();
+        double dur = srcClip.duration();
+        newClip.timelineIn = pasteTime + srcClip.timelineIn;
+        newClip.timelineOut = newClip.timelineIn + dur;
+        newClip.trackIndex = targetTrack;
+
+        state_.selectedClipIds.insert(newClip.id);
+        state_.project->tracks[targetTrack].clips.append(std::move(newClip));
+    }
+
+    state_.trackGeneration++;
+    state_.selectionGeneration++;
+    setState(std::move(state_));
+    pushUndo(before);
+    syncNativeToProject();
+    debouncedRenderFrame();
+}
+
+void TimelineNotifier::pasteClipsOverwrite() {
+    if (!state_.project || clipboardClips_.isEmpty()) return;
+    auto before = *state_.project;
+    double pasteTime = state_.playback.positionSeconds;
+
+    constexpr double kTolerance = 0.01;
+
+    // For each pasted clip, clear the region it will occupy by
+    // trimming, splitting, or removing existing clips in that zone.
+    for (const auto& srcClip : clipboardClips_) {
+        int targetTrack = srcClip.trackIndex;
+        if (targetTrack < 0 || targetTrack >= static_cast<int>(state_.project->tracks.size()))
+            targetTrack = 0;
+        auto& track = state_.project->tracks[targetTrack];
+        if (track.isLocked) continue;
+
+        double regionIn  = pasteTime + srcClip.timelineIn;
+        double regionOut = regionIn + srcClip.duration();
+
+        QList<VideoClip> kept;
+        for (const auto& clip : track.clips) {
+            bool startsBeforeRegion = clip.timelineIn < regionIn - kTolerance;
+            bool endsAfterRegion    = clip.timelineOut > regionOut + kTolerance;
+            bool startsInRegion     = clip.timelineIn >= regionIn - kTolerance
+                                   && clip.timelineIn < regionOut - kTolerance;
+            bool endsInRegion       = clip.timelineOut > regionIn + kTolerance
+                                   && clip.timelineOut <= regionOut + kTolerance;
+
+            if (startsBeforeRegion && endsAfterRegion) {
+                // Clip spans the entire paste region — split into two pieces
+                VideoClip leftPart = clip;
+                double leftDur = regionIn - clip.timelineIn;
+                leftPart.timelineOut = clip.timelineIn + leftDur;
+                leftPart.sourceOut = clip.sourceIn + leftDur / clip.speed;
+                kept.append(leftPart);
+
+                VideoClip rightPart = clip;
+                rightPart.id = trackClip_->nextClipId();
+                double rightStart = regionOut;
+                double trimmedFromSource = (regionOut - clip.timelineIn) / clip.speed;
+                rightPart.sourceIn = clip.sourceIn + trimmedFromSource;
+                rightPart.timelineIn = rightStart;
+                // timelineOut stays the same
+                kept.append(rightPart);
+            } else if (startsBeforeRegion && endsInRegion) {
+                // Clip overlaps left side — trim its right edge
+                VideoClip trimmed = clip;
+                double newDur = regionIn - clip.timelineIn;
+                trimmed.timelineOut = clip.timelineIn + newDur;
+                trimmed.sourceOut = clip.sourceIn + newDur / clip.speed;
+                kept.append(trimmed);
+            } else if (startsInRegion && endsAfterRegion) {
+                // Clip overlaps right side — trim its left edge
+                VideoClip trimmed = clip;
+                double trimAmount = regionOut - clip.timelineIn;
+                trimmed.sourceIn = clip.sourceIn + trimAmount / clip.speed;
+                trimmed.timelineIn = regionOut;
+                kept.append(trimmed);
+            } else if (startsInRegion && endsInRegion) {
+                // Clip entirely within paste region — remove it
+                // (do not append)
+            } else {
+                // Clip does not overlap paste region at all
+                kept.append(clip);
+            }
+        }
+        track.clips = kept;
+    }
+
+    // Insert pasted clips
+    state_.selectedClipIds.clear();
+    for (const auto& srcClip : clipboardClips_) {
+        int targetTrack = srcClip.trackIndex;
+        if (targetTrack < 0 || targetTrack >= static_cast<int>(state_.project->tracks.size()))
+            targetTrack = 0;
+
+        VideoClip newClip = srcClip;
+        newClip.id = trackClip_->nextClipId();
+        double dur = srcClip.duration();
+        newClip.timelineIn = pasteTime + srcClip.timelineIn;
+        newClip.timelineOut = newClip.timelineIn + dur;
+        newClip.trackIndex = targetTrack;
+
+        state_.selectedClipIds.insert(newClip.id);
+        state_.project->tracks[targetTrack].clips.append(std::move(newClip));
+    }
+
+    state_.trackGeneration++;
+    state_.selectionGeneration++;
+    setState(std::move(state_));
+    pushUndo(before);
+    syncNativeToProject();
+    debouncedRenderFrame();
+}
+
+bool TimelineNotifier::hasClipboardClips() const {
+    return !clipboardClips_.isEmpty();
+}
+
+QVariantList TimelineNotifier::pasteAttributeOptions() const {
+    QVariantList opts;
+    opts.append(QVariantMap{{QStringLiteral("key"), QStringLiteral("effects")},
+                            {QStringLiteral("label"), QStringLiteral("Effects")}});
+    opts.append(QVariantMap{{QStringLiteral("key"), QStringLiteral("colorGrading")},
+                            {QStringLiteral("label"), QStringLiteral("Color Grading")}});
+    opts.append(QVariantMap{{QStringLiteral("key"), QStringLiteral("transforms")},
+                            {QStringLiteral("label"), QStringLiteral("Transforms")}});
+    opts.append(QVariantMap{{QStringLiteral("key"), QStringLiteral("speed")},
+                            {QStringLiteral("label"), QStringLiteral("Speed")}});
+    opts.append(QVariantMap{{QStringLiteral("key"), QStringLiteral("audio")},
+                            {QStringLiteral("label"), QStringLiteral("Audio Settings")}});
+    opts.append(QVariantMap{{QStringLiteral("key"), QStringLiteral("transitions")},
+                            {QStringLiteral("label"), QStringLiteral("Transitions")}});
+    return opts;
+}
+
+void TimelineNotifier::pasteAttributes(bool effects, bool colorGrading,
+                                        bool transforms, bool speed,
+                                        bool audio, bool transitions) {
+    if (!state_.project || clipboardClips_.isEmpty() || state_.selectedClipIds.isEmpty()) return;
+    const auto& src = clipboardClips_.first();  // paste from first clipboard clip
+    auto before = *state_.project;
+
+    for (auto& track : state_.project->tracks) {
+        for (auto& clip : track.clips) {
+            if (!state_.selectedClipIds.contains(clip.id)) continue;
+
+            if (effects)
+                clip.effects = src.effects;
+            if (colorGrading)
+                clip.colorGrading = src.colorGrading;
+            if (transforms) {
+                clip.positionX = src.positionX;
+                clip.positionY = src.positionY;
+                clip.scaleX = src.scaleX;
+                clip.scaleY = src.scaleY;
+                clip.rotation = src.rotation;
+                clip.cropLeft = src.cropLeft;
+                clip.cropTop = src.cropTop;
+                clip.cropRight = src.cropRight;
+                clip.cropBottom = src.cropBottom;
+            }
+            if (speed) {
+                clip.speed = src.speed;
+                clip.isReversed = src.isReversed;
+            }
+            if (audio)
+                clip.audio = src.audio;
+            if (transitions) {
+                clip.transitionIn = src.transitionIn;
+                clip.transitionOut = src.transitionOut;
+            }
+        }
+    }
+
+    state_.trackGeneration++;
+    state_.selectionGeneration++;
+    setState(std::move(state_));
+    pushUndo(before);
+    syncNativeToProject();
+    debouncedRenderFrame();
+}
+
+void TimelineNotifier::selectTrackForward(int clipId) {
+    if (!state_.project) return;
+    const auto* clip = state_.project->findClip(clipId);
+    if (!clip) return;
+    int trackIdx = clip->trackIndex;
+    double startTime = clip->timelineIn;
+
+    state_.selectedClipIds.clear();
+    for (const auto& track : state_.project->tracks) {
+        if (track.index != trackIdx) continue;
+        for (const auto& c : track.clips) {
+            if (c.timelineIn >= startTime - 0.001)
+                state_.selectedClipIds.insert(c.id);
+        }
+    }
+    state_.selectedClipId = clipId;
+    state_.selectionGeneration++;
+    setState(std::move(state_));
+}
+
+void TimelineNotifier::selectTrackBackward(int clipId) {
+    if (!state_.project) return;
+    const auto* clip = state_.project->findClip(clipId);
+    if (!clip) return;
+    int trackIdx = clip->trackIndex;
+    double endTime = clip->timelineOut;
+
+    state_.selectedClipIds.clear();
+    for (const auto& track : state_.project->tracks) {
+        if (track.index != trackIdx) continue;
+        for (const auto& c : track.clips) {
+            if (c.timelineOut <= endTime + 0.001)
+                state_.selectedClipIds.insert(c.id);
+        }
+    }
+    state_.selectedClipId = clipId;
+    state_.selectionGeneration++;
+    setState(std::move(state_));
+}
+
+void TimelineNotifier::selectClipRange(int fromClipId, int toClipId) {
+    if (!state_.project) return;
+    const auto* fromClip = state_.project->findClip(fromClipId);
+    const auto* toClip = state_.project->findClip(toClipId);
+    if (!fromClip || !toClip) return;
+
+    double rangeStart = std::min(fromClip->timelineIn, toClip->timelineIn);
+    double rangeEnd = std::max(fromClip->timelineOut, toClip->timelineOut);
+
+    state_.selectedClipIds.clear();
+    for (const auto& track : state_.project->tracks) {
+        for (const auto& c : track.clips) {
+            // Select clips that overlap the range
+            if (c.timelineIn < rangeEnd + 0.001 && c.timelineOut > rangeStart - 0.001)
+                state_.selectedClipIds.insert(c.id);
+        }
+    }
+    state_.selectedClipId = toClipId;
+    state_.selectionGeneration++;
+    setState(std::move(state_));
+}
+
+void TimelineNotifier::selectNextClipOnTrack() {
+    if (!state_.project || !state_.selectedClipId.has_value()) return;
+    const auto* clip = state_.project->findClip(*state_.selectedClipId);
+    if (!clip) return;
+
+    const VideoClip* best = nullptr;
+    double bestTime = 1e18;
+    for (const auto& track : state_.project->tracks) {
+        if (track.index != clip->trackIndex) continue;
+        for (const auto& c : track.clips) {
+            if (c.timelineIn > clip->timelineIn + 0.001 && c.timelineIn < bestTime) {
+                bestTime = c.timelineIn;
+                best = &c;
+            }
+        }
+    }
+    if (best) {
+        state_.selectedClipIds.clear();
+        state_.selectedClipIds.insert(best->id);
+        state_.selectedClipId = best->id;
+        state_.selectionGeneration++;
+        setState(std::move(state_));
+    }
+}
+
+void TimelineNotifier::selectPrevClipOnTrack() {
+    if (!state_.project || !state_.selectedClipId.has_value()) return;
+    const auto* clip = state_.project->findClip(*state_.selectedClipId);
+    if (!clip) return;
+
+    const VideoClip* best = nullptr;
+    double bestTime = -1.0;
+    for (const auto& track : state_.project->tracks) {
+        if (track.index != clip->trackIndex) continue;
+        for (const auto& c : track.clips) {
+            if (c.timelineIn < clip->timelineIn - 0.001 && c.timelineIn > bestTime) {
+                bestTime = c.timelineIn;
+                best = &c;
+            }
+        }
+    }
+    if (best) {
+        state_.selectedClipIds.clear();
+        state_.selectedClipIds.insert(best->id);
+        state_.selectedClipId = best->id;
+        state_.selectionGeneration++;
+        setState(std::move(state_));
+    }
+}
+
+void TimelineNotifier::zoomToFit(double viewportWidth) {
+    if (!state_.project || viewportWidth <= 0) return;
+    double dur = state_.project->duration();
+    if (dur <= 0) dur = 30.0;
+    double fitPps = std::clamp(viewportWidth / dur, 0.01, 400.0);
+    state_.pixelsPerSecond = fitPps;
+    state_.scrollOffset = 0.0;
+    emit zoomChanged();
+}
+
+void TimelineNotifier::toggleZoomFit(double viewportWidth) {
+    if (!state_.project || viewportWidth <= 0) return;
+    double dur = state_.project->duration();
+    if (dur <= 0) dur = 30.0;
+    double fitPps = std::clamp(viewportWidth / dur, 0.01, 400.0);
+
+    // If currently near the fit zoom, restore saved zoom
+    if (savedZoomPps_ > 0 && std::abs(state_.pixelsPerSecond - fitPps) < 1.0) {
+        state_.pixelsPerSecond = savedZoomPps_;
+        savedZoomPps_ = -1.0;
+    } else {
+        savedZoomPps_ = state_.pixelsPerSecond;
+        state_.pixelsPerSecond = fitPps;
+        state_.scrollOffset = 0.0;
+    }
+    emit zoomChanged();
+}
+
+void TimelineNotifier::seekToTimecode(const QString& timecode) {
+    // Parse timecode in format "MM:SS:FF" or "HH:MM:SS:FF" or just seconds
+    double fps = state_.project ? state_.project->frameRate : 30.0;
+    QStringList parts = timecode.split(QStringLiteral(":"));
+    double seconds = 0.0;
+
+    if (parts.size() == 3) {
+        // MM:SS:FF
+        seconds = parts[0].toDouble() * 60.0
+                + parts[1].toDouble()
+                + parts[2].toDouble() / fps;
+    } else if (parts.size() == 4) {
+        // HH:MM:SS:FF
+        seconds = parts[0].toDouble() * 3600.0
+                + parts[1].toDouble() * 60.0
+                + parts[2].toDouble()
+                + parts[3].toDouble() / fps;
+    } else if (parts.size() == 1) {
+        // Try as raw seconds
+        seconds = timecode.toDouble();
+    }
+
+    if (seconds >= 0.0) {
+        playback_->seek(seconds);
+    }
+}
+
 QVariantList TimelineNotifier::selectedClipIdsVariant() const {
     QVariantList result;
     for (int id : state_.selectedClipIds)
@@ -1879,7 +3591,384 @@ QVariantMap TimelineNotifier::trackInfo(int trackIndex) const {
     result[QStringLiteral("isMuted")]   = track.isMuted;
     result[QStringLiteral("isSolo")]    = track.isSolo;
     result[QStringLiteral("color")]     = track.color.value_or(QString());
+    result[QStringLiteral("trackHeight")] = track.trackHeight;
+    result[QStringLiteral("volume")]    = track.audioSettings.volume;
+    result[QStringLiteral("pan")]       = track.audioSettings.pan;
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Track height
+// ---------------------------------------------------------------------------
+
+void TimelineNotifier::setTrackHeight(int trackIndex, double height) {
+    if (!state_.project) return;
+    auto& tracks = state_.project->tracks;
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size())) return;
+    height = std::clamp(height, 28.0, 200.0);
+    if (std::abs(tracks[trackIndex].trackHeight - height) < 0.5) return;
+    tracks[trackIndex].trackHeight = height;
+    state_.trackGeneration++;
+    setState(std::move(state_));
+}
+
+void TimelineNotifier::expandAllTracks() {
+    if (!state_.project) return;
+    for (auto& track : state_.project->tracks)
+        track.trackHeight = 120.0;
+    state_.trackGeneration++;
+    setState(std::move(state_));
+}
+
+void TimelineNotifier::collapseAllTracks() {
+    if (!state_.project) return;
+    for (auto& track : state_.project->tracks)
+        track.trackHeight = 28.0;
+    state_.trackGeneration++;
+    setState(std::move(state_));
+}
+
+// ---------------------------------------------------------------------------
+// Version history / auto-save
+// ---------------------------------------------------------------------------
+
+void TimelineNotifier::saveVersion(const QString& label) {
+    if (!state_.project) return;
+
+    VersionEntry entry;
+    entry.label = label.isEmpty() ? QStringLiteral("Checkpoint") : label;
+    entry.timestamp = QDateTime::currentDateTime().toString(Qt::ISODate);
+    entry.projectData = state_.project->toMap();
+    entry.isAutoSave = (label == QStringLiteral("Auto-save"));
+
+    versionHistory_.prepend(entry);  // newest first
+
+    // Enforce max versions — remove oldest auto-saves first
+    while (versionHistory_.size() > kMaxVersions) {
+        // Find oldest auto-save to remove, or just remove last
+        bool removed = false;
+        for (int i = versionHistory_.size() - 1; i >= 0; --i) {
+            if (versionHistory_[i].isAutoSave) {
+                versionHistory_.removeAt(i);
+                removed = true;
+                break;
+            }
+        }
+        if (!removed) versionHistory_.removeLast();
+    }
+
+    emit stateChanged();
+    qDebug() << "[VersionHistory] saved:" << entry.label << "at" << entry.timestamp
+             << "total:" << versionHistory_.size();
+}
+
+void TimelineNotifier::restoreVersion(int index) {
+    if (index < 0 || index >= versionHistory_.size()) return;
+    if (!state_.project) return;
+
+    // Save current state as undo point before restoring
+    auto before = *state_.project;
+
+    const auto& entry = versionHistory_[index];
+    auto restored = VideoProject::fromMap(entry.projectData);
+    *state_.project = restored;
+
+    state_.trackGeneration++;
+    state_.selectionGeneration++;
+    state_.selectedClipId.reset();
+    state_.selectedClipIds.clear();
+    setState(std::move(state_));
+    pushUndo(before);
+    syncNativeToProject();
+    debouncedRenderFrame();
+
+    qDebug() << "[VersionHistory] restored version:" << entry.label << "from" << entry.timestamp;
+}
+
+QVariantList TimelineNotifier::getVersionHistory() const {
+    QVariantList result;
+    for (int i = 0; i < versionHistory_.size(); ++i) {
+        const auto& v = versionHistory_[i];
+        QVariantMap m;
+        m[QStringLiteral("index")] = i;
+        m[QStringLiteral("label")] = v.label;
+        m[QStringLiteral("timestamp")] = v.timestamp;
+        m[QStringLiteral("isAutoSave")] = v.isAutoSave;
+        result.append(m);
+    }
+    return result;
+}
+
+void TimelineNotifier::setAutoSaveInterval(int seconds) {
+    autoSaveIntervalMs_ = std::max(10, seconds) * 1000;
+    autoSaveTimer_.setInterval(autoSaveIntervalMs_);
+}
+
+void TimelineNotifier::clearVersionHistory() {
+    versionHistory_.clear();
+    emit stateChanged();
+}
+
+// ---------------------------------------------------------------------------
+// Typed track lane helpers
+// ---------------------------------------------------------------------------
+
+bool TimelineNotifier::isTrackCompatible(int trackIndex, int sourceType) const {
+    if (!state_.project) return false;
+    const auto& tracks = state_.project->tracks;
+    if (trackIndex < 0 || trackIndex >= static_cast<int>(tracks.size())) return false;
+    if (tracks[trackIndex].isLocked) return false;
+    auto st = static_cast<ClipSourceType>(sourceType);
+    auto tt = tracks[trackIndex].type;
+    switch (st) {
+    case ClipSourceType::Video:
+    case ClipSourceType::Image:      return tt == TrackType::Video;
+    case ClipSourceType::Audio:      return tt == TrackType::Audio;
+    case ClipSourceType::Title:      return tt == TrackType::Title || tt == TrackType::Video;
+    case ClipSourceType::Color:
+    case ClipSourceType::Adjustment: return tt == TrackType::Effect;
+    default:                         return tt == TrackType::Video;
+    }
+}
+
+int TimelineNotifier::findCompatibleTrack(int nearTrackIndex, int sourceType) const {
+    if (!state_.project) return nearTrackIndex;
+    const auto& tracks = state_.project->tracks;
+    // If the target track is already compatible, return it
+    if (nearTrackIndex >= 0 && nearTrackIndex < static_cast<int>(tracks.size())
+        && isTrackCompatible(nearTrackIndex, sourceType))
+        return nearTrackIndex;
+    // Find nearest compatible track
+    int bestIdx = -1, bestDist = 9999;
+    for (int i = 0; i < static_cast<int>(tracks.size()); ++i) {
+        if (isTrackCompatible(i, sourceType)) {
+            int dist = std::abs(i - std::max(0, nearTrackIndex));
+            if (dist < bestDist) { bestDist = dist; bestIdx = i; }
+        }
+    }
+    return bestIdx >= 0 ? bestIdx : nearTrackIndex;
+}
+
+QVariantMap TimelineNotifier::batchClipSpan(const QVariantList& clipIds) const {
+    QVariantMap result;
+    if (!state_.project || clipIds.isEmpty()) {
+        result[QStringLiteral("minIn")]  = 0.0;
+        result[QStringLiteral("maxOut")] = 0.0;
+        return result;
+    }
+    // Build a QSet for O(1) lookup instead of O(D) per clip
+    QSet<int> idSet;
+    idSet.reserve(clipIds.size());
+    for (const auto& v : clipIds)
+        idSet.insert(v.toInt());
+
+    double minIn  = std::numeric_limits<double>::max();
+    double maxOut = 0.0;
+    // Single O(T×C) pass over all tracks/clips
+    for (const auto& track : state_.project->tracks) {
+        for (const auto& clip : track.clips) {
+            if (idSet.contains(clip.id)) {
+                minIn  = std::min(minIn, clip.timelineIn);
+                maxOut = std::max(maxOut, clip.timelineOut);
+            }
+        }
+    }
+    if (minIn > maxOut) minIn = 0.0;  // none found
+    result[QStringLiteral("minIn")]  = minIn;
+    result[QStringLiteral("maxOut")] = maxOut;
+    return result;
+}
+
+// ===========================================================================
+// Project JSON export
+// ===========================================================================
+
+QString TimelineNotifier::projectJson() const {
+    if (!state_.project) return QStringLiteral("{}");
+    return QJsonDocument(state_.project->toMap()).toJson(QJsonDocument::Compact);
+}
+
+// ===========================================================================
+// Template placeholder support
+// ===========================================================================
+
+QVariantList TimelineNotifier::templatePlaceholders() const {
+    QVariantList result;
+    if (!state_.project) return result;
+    for (const auto& track : state_.project->tracks) {
+        for (const auto& clip : track.clips) {
+            if (clip.isPlaceholder) {
+                QVariantMap entry;
+                entry[QStringLiteral("clipId")] = clip.id;
+                entry[QStringLiteral("displayName")] = clip.displayName;
+                entry[QStringLiteral("fieldType")] =
+                    clip.sourceType == ClipSourceType::Audio ? QStringLiteral("audio")
+                    : clip.sourceType == ClipSourceType::Title ? QStringLiteral("text")
+                    : QStringLiteral("media");
+                entry[QStringLiteral("placeholderLabel")] = clip.placeholderLabel;
+                result.append(entry);
+            }
+        }
+    }
+    return result;
+}
+
+bool TimelineNotifier::hasUnassignedClips() const {
+    if (!state_.project) return false;
+    for (const auto& track : state_.project->tracks) {
+        for (const auto& clip : track.clips) {
+            if (!clip.isPlaceholder) return true;
+        }
+    }
+    return false;
+}
+
+void TimelineNotifier::addPlaceholder(int clipId) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    updateClip(clipId, [](const VideoClip& c) {
+        return c.copyWith({.isPlaceholder = true});
+    });
+    pushUndo(before);
+    emit tracksChanged();
+}
+
+void TimelineNotifier::removePlaceholder(int index) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    int count = 0;
+    for (const auto& track : state_.project->tracks) {
+        for (const auto& clip : track.clips) {
+            if (clip.isPlaceholder) {
+                if (count == index) {
+                    updateClip(clip.id, [](const VideoClip& c) {
+                        return c.copyWith({.isPlaceholder = false});
+                    });
+                    pushUndo(before);
+                    emit tracksChanged();
+                    return;
+                }
+                ++count;
+            }
+        }
+    }
+}
+
+void TimelineNotifier::togglePlaceholder(int clipId) {
+    if (!state_.project) return;
+    const auto* clip = state_.project->findClip(clipId);
+    if (!clip) return;
+    auto before = *state_.project;
+    bool newVal = !clip->isPlaceholder;
+    updateClip(clipId, [newVal](const VideoClip& c) {
+        return c.copyWith({.isPlaceholder = newVal});
+    });
+    pushUndo(before);
+    emit tracksChanged();
+}
+
+void TimelineNotifier::showPlaceholderPicker() {
+    emit placeholderPickerRequested();
+}
+
+// ===========================================================================
+// Text clip content
+// ===========================================================================
+
+void TimelineNotifier::setClipTextContent(int clipId, const QString& text) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    updateClip(clipId, [&text](const VideoClip& c) {
+        return c.copyWith({.textContent = text});
+    });
+    pushUndo(before);
+    emit selectionChanged();
+}
+
+void TimelineNotifier::setClipFontFamily(int clipId, const QString& family) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    updateClip(clipId, [&family](const VideoClip& c) {
+        return c.copyWith({.fontFamily = family});
+    });
+    pushUndo(before);
+    emit selectionChanged();
+}
+
+void TimelineNotifier::setClipFontSize(int clipId, double size) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    updateClip(clipId, [size](const VideoClip& c) {
+        return c.copyWith({.fontSize = size});
+    });
+    pushUndo(before);
+    emit selectionChanged();
+}
+
+void TimelineNotifier::setClipFontColor(int clipId, const QString& color) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    updateClip(clipId, [&color](const VideoClip& c) {
+        return c.copyWith({.fontColor = color});
+    });
+    pushUndo(before);
+    emit selectionChanged();
+}
+
+void TimelineNotifier::setClipTextAlignment(int clipId, int alignment) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    updateClip(clipId, [alignment](const VideoClip& c) {
+        return c.copyWith({.textAlignment = alignment});
+    });
+    pushUndo(before);
+    emit selectionChanged();
+}
+
+// ===========================================================================
+// Transform
+// ===========================================================================
+
+void TimelineNotifier::setClipPosition(int clipId, double x, double y) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    updateClip(clipId, [x, y](const VideoClip& c) {
+        return c.copyWith({.positionX = x, .positionY = y});
+    });
+    pushUndo(before);
+    emit selectionChanged();
+}
+
+void TimelineNotifier::setClipScale(int clipId, double sx, double sy) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    updateClip(clipId, [sx, sy](const VideoClip& c) {
+        return c.copyWith({.scaleX = sx, .scaleY = sy});
+    });
+    pushUndo(before);
+    emit selectionChanged();
+}
+
+void TimelineNotifier::setClipRotation(int clipId, double degrees) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    updateClip(clipId, [degrees](const VideoClip& c) {
+        return c.copyWith({.rotation = degrees});
+    });
+    pushUndo(before);
+    emit selectionChanged();
+}
+
+void TimelineNotifier::setClipCrop(int clipId, double left, double top,
+                                    double right, double bottom) {
+    if (!state_.project) return;
+    auto before = *state_.project;
+    updateClip(clipId, [left, top, right, bottom](const VideoClip& c) {
+        return c.copyWith({.cropLeft = left, .cropTop = top,
+                           .cropRight = right, .cropBottom = bottom});
+    });
+    pushUndo(before);
+    emit selectionChanged();
 }
 
 } // namespace gopost::video_editor

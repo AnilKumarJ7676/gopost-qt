@@ -45,6 +45,7 @@ public:
     void setClipSpeed(int clipId, double speed);
     void reverseClip(int clipId);
     void freezeFrame(int clipId);
+    void addFreezeFrame(int clipId, double freezeDuration = 2.0, bool ripple = false);
 
     // ---- speed ramp ---------------------------------------------------------
     void applySpeedRamp(int clipId, const SpeedRampPreset& preset);

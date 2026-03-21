@@ -26,6 +26,7 @@ std::shared_ptr<FfmpegRunner> FfmpegRunner::create() {
 
 bool isFfmpegAvailable() {
     QProcess proc;
+    proc.setProcessChannelMode(QProcess::ForwardedChannels);
     proc.start(QStringLiteral("ffmpeg"), {QStringLiteral("-version")});
     if (!proc.waitForFinished(5000)) return false;
     return proc.exitCode() == 0;

@@ -14,7 +14,7 @@ namespace gopost::video_editor {
 // ── Enums ───────────────────────────────────────────────────────────────────
 
 enum class MediaAssetType : int { Video = 0, Image, Audio };
-enum class MediaAssetStatus : int { Online = 0, Offline };
+enum class MediaAssetStatus : int { Online = 0, Offline, Probing };
 
 // ── MediaAsset ──────────────────────────────────────────────────────────────
 

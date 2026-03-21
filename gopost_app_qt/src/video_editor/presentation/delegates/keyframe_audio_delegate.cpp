@@ -179,6 +179,7 @@ static std::optional<MediaProbeResult> runFfprobe(const QString& path, int timeo
     if (path.isEmpty() || !QFileInfo::exists(path)) return std::nullopt;
 
     QProcess proc;
+    proc.setProcessChannelMode(QProcess::ForwardedErrorChannel);
     proc.start(QStringLiteral("ffprobe"), {
         QStringLiteral("-v"), QStringLiteral("quiet"),
         QStringLiteral("-print_format"), QStringLiteral("flat"),
@@ -187,10 +188,14 @@ static std::optional<MediaProbeResult> runFfprobe(const QString& path, int timeo
         path
     });
 
-    if (!proc.waitForFinished(timeoutMs)) {
-        proc.kill();
-        qWarning() << "[MediaProbe] ffprobe timed out for:" << path;
-        return std::nullopt;
+    // Read incrementally to avoid QRingBuffer overflow
+    QByteArray rawOutput;
+    while (proc.state() != QProcess::NotRunning || proc.bytesAvailable() > 0) {
+        if (proc.bytesAvailable() > 0) {
+            rawOutput.append(proc.read(proc.bytesAvailable()));
+        } else if (!proc.waitForReadyRead(timeoutMs)) {
+            break;
+        }
     }
 
     if (proc.exitCode() != 0) {
@@ -198,7 +203,7 @@ static std::optional<MediaProbeResult> runFfprobe(const QString& path, int timeo
         return std::nullopt;
     }
 
-    const auto output = QString::fromUtf8(proc.readAllStandardOutput());
+    const auto output = QString::fromUtf8(rawOutput);
     MediaProbeResult result;
 
     // Parse duration

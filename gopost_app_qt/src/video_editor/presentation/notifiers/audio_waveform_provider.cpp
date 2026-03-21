@@ -1,11 +1,15 @@
 #include "video_editor/presentation/notifiers/audio_waveform_provider.h"
 
 #include <QColor>
+#include <QCoreApplication>
 #include <QDebug>
+#include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QMetaObject>
 #include <QPainter>
 #include <QProcess>
+#include <QThread>
 
 #include <algorithm>
 #include <cmath>
@@ -178,11 +182,19 @@ std::vector<float> WaveformWorker::extractPeaks(const QString& filePath,
     int sampleRate = std::clamp(static_cast<int>(rawSamplesNeeded / duration),
                                  4000, 22050);
 
+    // Write PCM audio to temp file instead of piping through stdout
+    // to avoid Qt QRingBuffer overflow on large audio clips.
+    QString tmpPath = QDir::tempPath() + QStringLiteral("/gopost_waveform_%1_%2.raw")
+        .arg(QCoreApplication::applicationPid())
+        .arg(reinterpret_cast<quintptr>(QThread::currentThread()), 0, 16);
+
     QProcess ffmpeg;
-    ffmpeg.setProcessChannelMode(QProcess::SeparateChannels);
+    ffmpeg.setProcessChannelMode(QProcess::ForwardedChannels);
 
     QStringList args = {
         QStringLiteral("-y"),
+        QStringLiteral("-nostdin"),
+        QStringLiteral("-loglevel"), QStringLiteral("quiet"),
         QStringLiteral("-ss"), QString::number(startSec, 'f', 3),
         QStringLiteral("-t"), QString::number(std::min(duration, 120.0), 'f', 3),  // cap at 2 min
         QStringLiteral("-i"), filePath,
@@ -191,20 +203,24 @@ std::vector<float> WaveformWorker::extractPeaks(const QString& filePath,
         QStringLiteral("-ar"), QString::number(sampleRate),
         QStringLiteral("-f"), QStringLiteral("s16le"),
         QStringLiteral("-acodec"), QStringLiteral("pcm_s16le"),
-        QStringLiteral("pipe:1")
+        tmpPath
     };
 
     ffmpeg.start(QStringLiteral("ffmpeg"), args);
-    if (!ffmpeg.waitForStarted(3000)) {
-        return peaks;
-    }
-    if (!ffmpeg.waitForFinished(8000)) {
+    if (!ffmpeg.waitForFinished(15000)) {
         ffmpeg.kill();
         ffmpeg.waitForFinished(500);
+        QFile::remove(tmpPath);
         return peaks;
     }
 
-    QByteArray rawData = ffmpeg.readAllStandardOutput();
+    QFile tmpFile(tmpPath);
+    QByteArray rawData;
+    if (ffmpeg.exitCode() == 0 && tmpFile.exists() && tmpFile.open(QIODevice::ReadOnly)) {
+        rawData = tmpFile.readAll();
+        tmpFile.close();
+    }
+    QFile::remove(tmpPath);
     if (rawData.isEmpty()) return peaks;
 
     // Parse s16le PCM samples

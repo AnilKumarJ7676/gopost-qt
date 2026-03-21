@@ -19,7 +19,7 @@ struct Defaults {
 #elif defined(Q_OS_IOS) || defined(Q_OS_ANDROID)
         return { 150, 64 * 1024 * 1024, 1, true };  // 150 entries, 64MB disk
 #else
-        return { 500, 200 * 1024 * 1024, 2, true };  // 500 entries, 200MB disk
+        return { 500, 200 * 1024 * 1024, 4, true };  // 500 entries, 200MB disk, 4 decoder threads
 #endif
     }
 };

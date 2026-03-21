@@ -102,7 +102,7 @@ public:
     void setClipColorGrading(int timelineId, int clipId, double brightness,
         double contrast, double saturation, double exposure,
         double temperature, double tint, double highlights, double shadows,
-        double vibrance, double hue) override;
+        double vibrance, double hue, double fade, double vignette) override;
     void clearClipEffects(int timelineId, int clipId) override;
     void setClipPan(int timelineId, int clipId, double pan) override;
     void setClipFadeIn(int timelineId, int clipId, double seconds) override;
@@ -170,10 +170,12 @@ public:
         double brightness = 0, contrast = 0, saturation = 0;
         double exposure = 0, temperature = 0, tint = 0;
         double highlights = 0, shadows = 0, vibrance = 0, hue = 0;
+        double fade = 0, vignette = 0;
         bool isDefault() const {
             return brightness == 0 && contrast == 0 && saturation == 0 &&
                    exposure == 0 && temperature == 0 && tint == 0 &&
-                   highlights == 0 && shadows == 0 && vibrance == 0 && hue == 0;
+                   highlights == 0 && shadows == 0 && vibrance == 0 && hue == 0 &&
+                   fade == 0 && vignette == 0;
         }
     };
 

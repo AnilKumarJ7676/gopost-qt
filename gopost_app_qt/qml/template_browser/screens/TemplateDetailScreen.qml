@@ -24,11 +24,9 @@ Page {
             if (!tmpl) return
             var route
             if (tmpl.editableFields && tmpl.editableFields.length > 0) {
-                route = tmpl.isVideo
-                    ? "/editor/video/customize/" + tmpl.id
-                    : "/editor/customize/" + tmpl.id
+                route = "/editor/customize/" + tmpl.id
             } else {
-                route = tmpl.isVideo ? "/editor/video" : "/editor/image"
+                route = tmpl.isVideo ? "/editor/video2" : "/editor/image"
             }
             router.push(route)
             downloadNotifier.reset()

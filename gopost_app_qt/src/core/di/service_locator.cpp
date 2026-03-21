@@ -194,6 +194,11 @@ void ServiceLocator::registerWithQml(QQmlApplicationEngine* engine) {
 
     // GoCraft
     setCtx(ctx, QStringLiteral("goCraftNotifier"), m_goCraftNotifier.get());
+
+    // Core engines
+    setCtx(ctx, QStringLiteral("diagnosticsEngine"), m_diagnosticsEngine);
+    setCtx(ctx, QStringLiteral("configEngine"), m_configEngine);
+    setCtx(ctx, QStringLiteral("eventBusEngine"), m_eventBusEngine);
 }
 
 void ServiceLocator::setImageEditorEngine(rendering::ImageEditorEngine* engine) {
@@ -202,6 +207,30 @@ void ServiceLocator::setImageEditorEngine(rendering::ImageEditorEngine* engine) 
 
 void ServiceLocator::setVideoTimelineEngine(rendering::VideoTimelineEngine* engine) {
     m_videoTimelineEngine = engine;
+}
+
+void ServiceLocator::setPlatformEngine(engines::PlatformCapabilityEngine* engine) {
+    m_platformEngine = engine;
+}
+
+void ServiceLocator::setMemoryEngine(engines::MemoryManagementEngine* engine) {
+    m_memoryEngine = engine;
+}
+
+void ServiceLocator::setLoggingEngine(engines::LoggingEngine* engine) {
+    m_loggingEngine = engine;
+}
+
+void ServiceLocator::setConfigEngine(engines::ConfigurationEngine* engine) {
+    m_configEngine = engine;
+}
+
+void ServiceLocator::setDiagnosticsEngine(engines::DiagnosticsEngine* engine) {
+    m_diagnosticsEngine = engine;
+}
+
+void ServiceLocator::setEventBusEngine(engines::EventBusEngine* engine) {
+    m_eventBusEngine = engine;
 }
 
 } // namespace gopost::core

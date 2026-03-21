@@ -20,6 +20,15 @@ class ImageEditorEngine;
 class VideoTimelineEngine;
 } // namespace gopost::rendering
 
+namespace gopost::core::engines {
+class PlatformCapabilityEngine;
+class MemoryManagementEngine;
+class LoggingEngine;
+class ConfigurationEngine;
+class DiagnosticsEngine;
+class EventBusEngine;
+} // namespace gopost::core::engines
+
 namespace gopost::image_editor {
 class CanvasNotifier;
 class ToolNotifier;
@@ -69,11 +78,25 @@ public:
     HttpClient* httpClient() const { return m_httpClient.get(); }
     Router* router() const { return m_router.get(); }
 
-    // Engines
+    // Rendering engines
     void setImageEditorEngine(rendering::ImageEditorEngine* engine);
     void setVideoTimelineEngine(rendering::VideoTimelineEngine* engine);
     rendering::ImageEditorEngine* imageEditorEngine() const { return m_imageEditorEngine; }
     rendering::VideoTimelineEngine* videoTimelineEngine() const { return m_videoTimelineEngine; }
+
+    // Core engines (not owned)
+    void setPlatformEngine(engines::PlatformCapabilityEngine* engine);
+    void setMemoryEngine(engines::MemoryManagementEngine* engine);
+    void setLoggingEngine(engines::LoggingEngine* engine);
+    void setConfigEngine(engines::ConfigurationEngine* engine);
+    void setDiagnosticsEngine(engines::DiagnosticsEngine* engine);
+    void setEventBusEngine(engines::EventBusEngine* engine);
+    engines::PlatformCapabilityEngine* platformEngine() const { return m_platformEngine; }
+    engines::MemoryManagementEngine* memoryEngine() const { return m_memoryEngine; }
+    engines::LoggingEngine* loggingEngine() const { return m_loggingEngine; }
+    engines::ConfigurationEngine* configEngine() const { return m_configEngine; }
+    engines::DiagnosticsEngine* diagnosticsEngine() const { return m_diagnosticsEngine; }
+    engines::EventBusEngine* eventBusEngine() const { return m_eventBusEngine; }
 
     // Auth
     auth::AuthNotifier* authNotifier() const { return m_authNotifier.get(); }
@@ -102,9 +125,17 @@ private:
     std::unique_ptr<HttpClient> m_httpClient;
     std::unique_ptr<Router> m_router;
 
-    // Engines (not owned)
+    // Rendering engines (not owned)
     rendering::ImageEditorEngine* m_imageEditorEngine = nullptr;
     rendering::VideoTimelineEngine* m_videoTimelineEngine = nullptr;
+
+    // Core engines (not owned)
+    engines::PlatformCapabilityEngine* m_platformEngine = nullptr;
+    engines::MemoryManagementEngine* m_memoryEngine = nullptr;
+    engines::LoggingEngine* m_loggingEngine = nullptr;
+    engines::ConfigurationEngine* m_configEngine = nullptr;
+    engines::DiagnosticsEngine* m_diagnosticsEngine = nullptr;
+    engines::EventBusEngine* m_eventBusEngine = nullptr;
 
     // Auth
     std::unique_ptr<auth::AuthNotifier> m_authNotifier;

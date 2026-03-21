@@ -496,6 +496,12 @@ std::optional<DecodedImage> StubVideoTimelineEngine::renderFrame(
         return std::nullopt;  // no tracks → no frame
     }
 
+    // Check if any track is soloed
+    bool anySolo = false;
+    for (const auto& [idx, params] : trackAudioParams_) {
+        if (params.solo) { anySolo = true; break; }
+    }
+
     // Collect visible clips across all tracks (bottom-to-top order)
     struct VisibleClip {
         const StubClip* clip;
@@ -503,6 +509,12 @@ std::optional<DecodedImage> StubVideoTimelineEngine::renderFrame(
     };
     std::vector<VisibleClip> visible;
     for (int ti = static_cast<int>(trackIt->second.size()) - 1; ti >= 0; --ti) {
+        // Solo filter: if any track is soloed, skip non-soloed tracks
+        if (anySolo) {
+            auto paramIt = trackAudioParams_.find(ti);
+            if (paramIt == trackAudioParams_.end() || !paramIt->second.solo)
+                continue;
+        }
         for (const auto& clip : trackIt->second[ti].clips) {
             if (pos >= clip.timelineRange.inTime - 0.001 &&
                 pos < clip.timelineRange.outTime + 0.001) {
@@ -1009,11 +1021,12 @@ void StubVideoTimelineEngine::clearClipKeyframes(int tl, int clipId, int prop) {
 void StubVideoTimelineEngine::setClipColorGrading(int tl, int clipId,
     double brightness, double contrast, double saturation, double exposure,
     double temperature, double tint, double highlights, double shadows,
-    double vibrance, double hue) {
+    double vibrance, double hue, double fade, double vignette) {
     checkTimeline(tl);
     colorGradingParams_[clipId] = {brightness, contrast, saturation,
                                    exposure, temperature, tint,
-                                   highlights, shadows, vibrance, hue};
+                                   highlights, shadows, vibrance, hue,
+                                   fade, vignette};
 }
 void StubVideoTimelineEngine::clearClipEffects(int tl, int clipId) {
     checkTimeline(tl);
@@ -1469,10 +1482,38 @@ void StubVideoTimelineEngine::applyColorGrading(QImage& img, int clipId) {
             r = nr; g = ng; b = nb;
         }
 
+        // Fade: lift blacks toward mid-gray
+        if (cg.fade > 0) {
+            double fadeLift = cg.fade * 0.01 * 0.3; // max 30% lift
+            r = r + (128.0 - r) * fadeLift;
+            g = g + (128.0 - g) * fadeLift;
+            b = b + (128.0 - b) * fadeLift;
+        }
+
         data[0] = static_cast<uint8_t>(std::clamp(r, 0.0, 255.0));
         data[1] = static_cast<uint8_t>(std::clamp(g, 0.0, 255.0));
         data[2] = static_cast<uint8_t>(std::clamp(b, 0.0, 255.0));
         data += 4;
+    }
+
+    // Vignette: darken edges with radial falloff
+    if (cg.vignette > 0) {
+        const double vigStrength = cg.vignette * 0.01;
+        const int w = img.width(), h = img.height();
+        const double cx = w * 0.5, cy = h * 0.5;
+        const double maxDist = std::sqrt(cx * cx + cy * cy);
+        uint8_t* bits = img.bits();
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                double dx = x - cx, dy = y - cy;
+                double dist = std::sqrt(dx * dx + dy * dy) / maxDist;
+                double factor = 1.0 - vigStrength * dist * dist;
+                uint8_t* px = bits + (y * w + x) * 4;
+                px[0] = static_cast<uint8_t>(std::clamp(px[0] * factor, 0.0, 255.0));
+                px[1] = static_cast<uint8_t>(std::clamp(px[1] * factor, 0.0, 255.0));
+                px[2] = static_cast<uint8_t>(std::clamp(px[2] * factor, 0.0, 255.0));
+            }
+        }
     }
 }
 

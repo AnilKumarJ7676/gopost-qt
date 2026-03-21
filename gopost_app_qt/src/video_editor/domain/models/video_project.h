@@ -195,6 +195,41 @@ struct VideoClip {
     std::optional<QString> colorTag;   // user-assigned color hex (e.g. "#EF5350"), nullopt = auto
     QString customLabel;               // user-assigned overlay label (empty = none)
 
+    // Transform properties
+    double positionX{0.0};
+    double positionY{0.0};
+    double scaleX{1.0};
+    double scaleY{1.0};
+    double rotation{0.0};
+    double cropLeft{0.0};
+    double cropTop{0.0};
+    double cropRight{0.0};
+    double cropBottom{0.0};
+
+    // Text content (for Title/Subtitle clips)
+    QString textContent;
+    QString fontFamily;
+    double fontSize{24.0};
+    QString fontColor{QStringLiteral("#FFFFFF")};
+    int textAlignment{1};   // 0=left, 1=center, 2=right
+
+    // Original source file duration (never changes after clip creation)
+    double sourceDuration{0.0};
+
+    // Freeze frame flag
+    bool isFreezeFrame{false};
+
+    // Disabled clip flag (skipped during playback, rendered dimmed)
+    bool isDisabled{false};
+
+    // Template placeholder flag
+    bool isPlaceholder{false};
+    QString placeholderLabel;  // hint for template users (e.g. "Main footage")
+
+    // Magnetic timeline: connected clip (FCP-style)
+    std::optional<int> connectedToPrimaryClipId;  // anchored to this primary storyline clip
+    std::optional<double> syncPointOffset;         // seconds offset from primary clip's timelineIn
+
     [[nodiscard]] bool isAdjustmentLayer() const { return sourceType == ClipSourceType::Adjustment; }
     [[nodiscard]] double duration() const { return timelineOut - timelineIn; }
 
@@ -236,6 +271,35 @@ struct VideoClip {
         std::optional<QString> colorTag;
         bool clearColorTag{false};
         std::optional<QString> customLabel;
+        // Transform
+        std::optional<double> positionX;
+        std::optional<double> positionY;
+        std::optional<double> scaleX;
+        std::optional<double> scaleY;
+        std::optional<double> rotation;
+        std::optional<double> cropLeft;
+        std::optional<double> cropTop;
+        std::optional<double> cropRight;
+        std::optional<double> cropBottom;
+        // Text
+        std::optional<QString> textContent;
+        std::optional<QString> fontFamily;
+        std::optional<double> fontSize;
+        std::optional<QString> fontColor;
+        std::optional<int> textAlignment;
+        // Source duration
+        std::optional<double> sourceDuration;
+        // Freeze frame
+        std::optional<bool> isFreezeFrame;
+        // Disabled clip
+        std::optional<bool> isDisabled;
+        // Placeholder
+        std::optional<bool> isPlaceholder;
+        std::optional<QString> placeholderLabel;
+        // Magnetic timeline connected clip
+        std::optional<int> connectedToPrimaryClipId;
+        bool clearConnectedToPrimaryClipId{false};
+        std::optional<double> syncPointOffset;
     };
 
     [[nodiscard]] VideoClip copyWith(const CopyWithOpts& opts) const;
@@ -259,6 +323,8 @@ struct VideoTrack {
     QList<VideoClip> clips;
     TrackAudioSettings audioSettings;
     std::optional<QString> color;   // user-assigned track color hex, nullopt = default
+    double trackHeight{64.0};       // per-track height in pixels (min 28, max 200)
+    bool isMagneticPrimary{false};  // true for primary storyline track (magnetic timeline)
 
     struct CopyWithOpts {
         std::optional<QString> label;
@@ -270,6 +336,8 @@ struct VideoTrack {
         std::optional<TrackAudioSettings> audioSettings;
         std::optional<QString> color;
         bool clearColor{false};
+        std::optional<double> trackHeight;
+        std::optional<bool> isMagneticPrimary;
     };
 
     [[nodiscard]] VideoTrack copyWith(const CopyWithOpts& opts) const;

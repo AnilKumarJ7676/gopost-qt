@@ -11,6 +11,8 @@
 #include <QColor>
 #include <QFont>
 #include <QQuickTextureFactory>
+#include <QCoreApplication>
+#include <QThread>
 #include <algorithm>
 
 namespace gopost::video_editor {
@@ -199,7 +201,7 @@ BatchCoordinator::BatchCoordinator(ThumbnailCache* cache, QThreadPool* pool, QOb
     , pool_(pool)
 {
     collectTimer_.setSingleShot(true);
-    collectTimer_.setInterval(50);  // 50ms collection window
+    collectTimer_.setInterval(200);  // 200ms collection window — gives staggered clips time to enqueue
     connect(&collectTimer_, &QTimer::timeout, this, &BatchCoordinator::dispatchBatches);
 }
 
@@ -218,6 +220,12 @@ void BatchCoordinator::dispatchBatches() {
 
     if (pending_.isEmpty()) return;
 
+    // Cap concurrent active files to avoid resource exhaustion when many
+    // clips are added at once (each worker spawns ffmpeg processes).
+    // The thread pool already limits parallelism, but capping active files
+    // prevents queueing 20+ runnables that would each open ffmpeg pipes.
+    static constexpr int kMaxActiveFiles = 4;
+
     int totalRequests = 0;
     int fileCount = 0;
 
@@ -229,6 +237,9 @@ void BatchCoordinator::dispatchBatches() {
             ++it;
             continue;
         }
+
+        // Don't dispatch more than kMaxActiveFiles at once
+        if (static_cast<int>(activeFiles_.size()) >= kMaxActiveFiles) break;
 
         QList<BatchFileWorker::Request> workerRequests;
         for (const auto& req : it.value()) {
@@ -250,7 +261,9 @@ void BatchCoordinator::dispatchBatches() {
 
     if (totalRequests > 0) {
         qDebug() << "[Thumbnails] dispatched" << totalRequests
-                 << "requests across" << fileCount << "files";
+                 << "requests across" << fileCount << "files"
+                 << "(active:" << activeFiles_.size()
+                 << "pending:" << pending_.size() << "files remaining)";
     }
 }
 
@@ -345,37 +358,37 @@ QImage BatchFileWorker::extractFramePipe(const QString& filePath, double timeSec
         return makePlaceholder(width, height, timeSec);
     }
 
-    // ffmpeg with image2pipe output — reads PNG from stdout, no temp files
-    QProcess ffmpeg;
-    ffmpeg.setProcessChannelMode(QProcess::SeparateChannels);
+    // Write thumbnail to a temp file using system() to completely bypass
+    // Qt's QProcess and its internal QRingBuffer which overflows on
+    // H.265 MKV files with large metadata streams.
+    QString tmpPath = QDir::tempPath() + QStringLiteral("/gopost_thumb_%1_%2.jpg")
+        .arg(QCoreApplication::applicationPid())
+        .arg(reinterpret_cast<quintptr>(QThread::currentThread()), 0, 16);
 
-    ffmpeg.start(QStringLiteral("ffmpeg"), {
-        QStringLiteral("-y"),
-        QStringLiteral("-ss"), QString::number(timeSec, 'f', 2),
-        QStringLiteral("-i"), filePath,
-        QStringLiteral("-vframes"), QStringLiteral("1"),
-        QStringLiteral("-vf"),
-        QStringLiteral("scale=%1:%2:force_original_aspect_ratio=decrease,"
-                       "pad=%1:%2:(ow-iw)/2:(oh-ih)/2:color=0D0D1A")
-            .arg(width).arg(height),
-        QStringLiteral("-f"), QStringLiteral("image2pipe"),
-        QStringLiteral("-vcodec"), QStringLiteral("png"),
-        QStringLiteral("pipe:1")
-    });
+    // Remove any stale file from a previous run
+    QFile::remove(tmpPath);
 
-    if (!ffmpeg.waitForFinished(5000)) {
-        ffmpeg.kill();
-        ffmpeg.waitForFinished(500);
-        return makePlaceholder(width, height, timeSec);
-    }
+    // Build command — use system() to avoid QProcess entirely
+    QString cmd = QStringLiteral(
+        "ffmpeg -y -nostdin -loglevel quiet -ss %1 -i \"%2\" "
+        "-vframes 1 -vf \"scale=%3:%4:force_original_aspect_ratio=decrease,"
+        "pad=%3:%4:(ow-iw)/2:(oh-ih)/2:color=0D0D1A\" -q:v 2 \"%5\"")
+        .arg(QString::number(timeSec, 'f', 2))
+        .arg(filePath)
+        .arg(width)
+        .arg(height)
+        .arg(tmpPath);
 
-    if (ffmpeg.exitCode() != 0) {
-        return makePlaceholder(width, height, timeSec);
-    }
+    int ret = system(cmd.toLocal8Bit().constData());
 
-    QByteArray pngData = ffmpeg.readAllStandardOutput();
     QImage frame;
-    if (frame.loadFromData(pngData, "PNG") && !frame.isNull()) {
+    if (ret == 0 && QFileInfo::exists(tmpPath)) {
+        frame.load(tmpPath);
+    }
+
+    QFile::remove(tmpPath);
+
+    if (!frame.isNull()) {
         return frame;
     }
 

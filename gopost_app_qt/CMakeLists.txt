@@ -16,6 +16,7 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS
     Network
     Multimedia
     Concurrent
+    ShaderTools
 )
 
 qt_standard_project_setup(REQUIRES 6.5)
@@ -69,34 +70,6 @@ qt_add_qml_module(gopost_app_qt
         qml/image_editor/widgets/TextToolPanel.qml
         qml/image_editor/widgets/TransformOverlay.qml
         qml/image_editor/widgets/TransformHandle.qml
-        qml/video_editor/screens/VideoEditorScreen.qml
-        qml/video_editor/screens/ProjectListScreen.qml
-        qml/video_editor/screens/VideoExportScreen.qml
-        qml/video_editor/screens/VideoTemplateCustomizationScreen.qml
-        qml/video_editor/widgets/AdjustmentClipPainter.qml
-        qml/video_editor/widgets/AdjustmentLayerPanel.qml
-        qml/video_editor/widgets/AudioControlsPanel.qml
-        qml/video_editor/widgets/ClipInspectorPanel.qml
-        qml/video_editor/widgets/ClipWidget.qml
-        qml/video_editor/widgets/ColorGradingPanel.qml
-        qml/video_editor/widgets/CropTransformPanel.qml
-        qml/video_editor/widgets/DockSystem.qml
-        qml/video_editor/widgets/EditorSidebar.qml
-        qml/video_editor/widgets/EffectsPanel.qml
-        qml/video_editor/widgets/KeyframeEditor.qml
-        qml/video_editor/widgets/MarkersPanel.qml
-        qml/video_editor/widgets/MediaPoolPanel.qml
-        qml/video_editor/widgets/Playhead.qml
-        qml/video_editor/widgets/ResizableSplit.qml
-        qml/video_editor/widgets/SaveAsVideoTemplateDialog.qml
-        qml/video_editor/widgets/SpeedControlsPanel.qml
-        qml/video_editor/widgets/TextEditorPanel.qml
-        qml/video_editor/widgets/TimeRuler.qml
-        qml/video_editor/widgets/TimelinePanel.qml
-        qml/video_editor/widgets/TrackWidget.qml
-        qml/video_editor/widgets/TransitionPicker.qml
-        qml/video_editor/widgets/VideoPreviewPanel.qml
-        qml/video_editor/widgets/VideoToolbar.qml
         qml/template_browser/screens/HomeScreen.qml
         qml/template_browser/screens/BrowseScreen.qml
         qml/template_browser/screens/TemplateDetailScreen.qml
@@ -114,6 +87,14 @@ qt_add_qml_module(gopost_app_qt
         qml/video_editor_2/widgets/VE2PropertyPanel.qml
         qml/video_editor_2/widgets/VE2MediaPoolPanel.qml
         qml/video_editor_2/widgets/VE2EditorSidebar.qml
+        qml/video_editor_2/widgets/VE2TimelineToolbar.qml
+)
+
+qt6_add_shaders(gopost_app_qt "gopost_shaders"
+    BATCHABLE
+    PREFIX "/GopostApp"
+    FILES
+        shaders/colorgrading.frag
 )
 
 target_link_libraries(gopost_app_qt PRIVATE
@@ -126,6 +107,7 @@ target_link_libraries(gopost_app_qt PRIVATE
     Qt6::Multimedia
     Qt6::Concurrent
     Qt6::QuickDialogs2
+    Qt6::ShaderTools
     gopost_core_lib
     gopost_auth_lib
     gopost_rendering_bridge_lib

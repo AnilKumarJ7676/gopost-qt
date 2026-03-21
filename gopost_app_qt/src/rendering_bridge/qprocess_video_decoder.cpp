@@ -114,7 +114,7 @@ bool QProcessVideoDecoder::probe(const QString& path) {
     QString ffprobe = findExecutable(QStringLiteral("ffprobe"));
 
     QProcess proc;
-    proc.setProcessChannelMode(QProcess::MergedChannels);
+    proc.setProcessChannelMode(QProcess::ForwardedErrorChannel);
     proc.start(ffprobe, {
         QStringLiteral("-v"), QStringLiteral("quiet"),
         QStringLiteral("-print_format"), QStringLiteral("json"),
@@ -124,14 +124,17 @@ bool QProcessVideoDecoder::probe(const QString& path) {
         path
     });
 
-    if (!proc.waitForFinished(10000)) {
-        proc.kill();
-        return false;
+    // Read incrementally to avoid QRingBuffer overflow
+    QByteArray output;
+    while (proc.state() != QProcess::NotRunning || proc.bytesAvailable() > 0) {
+        if (proc.bytesAvailable() > 0) {
+            output.append(proc.read(proc.bytesAvailable()));
+        } else if (!proc.waitForReadyRead(10000)) {
+            break;
+        }
     }
 
     if (proc.exitCode() != 0) return false;
-
-    QByteArray output = proc.readAllStandardOutput();
     QJsonParseError parseError;
     QJsonDocument doc = QJsonDocument::fromJson(output, &parseError);
     if (parseError.error != QJsonParseError::NoError) return false;
@@ -203,7 +206,9 @@ bool QProcessVideoDecoder::startDecodeProcess(double startTime) {
          << QStringLiteral("pipe:1");
 
     ffmpeg_ = std::make_unique<QProcess>();
-    ffmpeg_->setReadChannel(QProcess::StandardOutput);
+    // ForwardedErrorChannel sends stderr directly to parent's stderr,
+    // completely bypassing Qt's internal QRingBuffer that can overflow.
+    ffmpeg_->setProcessChannelMode(QProcess::ForwardedErrorChannel);
 
     qDebug() << "[QProcessDecoder] starting ffmpeg:" << ffmpeg << args.join(' ');
     ffmpeg_->start(ffmpeg, args);
@@ -271,7 +276,8 @@ std::optional<RenderDecodedFrame> QProcessVideoDecoder::decodeNextFrame() {
     const size_t frameBytes = static_cast<size_t>(decodeWidth_) * decodeHeight_ * 4;
     if (frameBytes == 0) return std::nullopt;
 
-    // Read exactly one frame worth of RGBA data from stdout pipe
+    // Read exactly one frame worth of RGBA data from stdout pipe.
+    // stderr is forwarded (ForwardedErrorChannel) so no QRingBuffer risk.
     QByteArray data;
     data.reserve(static_cast<int>(frameBytes));
 

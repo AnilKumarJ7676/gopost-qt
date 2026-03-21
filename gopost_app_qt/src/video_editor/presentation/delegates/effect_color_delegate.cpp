@@ -70,6 +70,7 @@ void EffectColorDelegate::updateEffect(int clipId, EffectType type, double value
         }
         return updated;
     });
+    ops_->syncEffectsToEngine(clipId);
     ops_->debouncedRenderFrame();
 }
 
@@ -97,6 +98,7 @@ void EffectColorDelegate::setColorGrading(int clipId, const ColorGrading& gradin
         updated.colorGrading = grading;
         return updated;
     });
+    ops_->syncEffectsToEngine(clipId);
     ops_->debouncedRenderFrame();
 }
 
@@ -138,21 +140,48 @@ std::vector<std::pair<PresetFilterId, ColorGrading>> EffectColorDelegate::buildP
         return g;
     };
 
-    map.emplace_back(PresetFilterId::Cinematic,    make(  -5,  10,  -8,  -10,  0,  -15,  -5,   0,  5, 20));
+    // Lighting & Scene
+    map.emplace_back(PresetFilterId::Natural,      make(   2,   3,   5,    0,  0,    0,   0,   5,  0,  0));
+    map.emplace_back(PresetFilterId::Daylight,     make(   5,   5,   8,   10, -3,    5,   5,   8,  0,  0));
+    map.emplace_back(PresetFilterId::GoldenHour,   make(  10,   5,  10,   35, 10,   -5,  10,  12,  0,  8));
+    map.emplace_back(PresetFilterId::Overcast,     make(  -3,  -5,  -8,  -10,  0,    5,  -5,  -5,  3,  0));
+    map.emplace_back(PresetFilterId::Studio,       make(   0,  10,   0,    0,  0,   -5,   5,   0,  0,  5));
+
+    // Portrait
+    map.emplace_back(PresetFilterId::Portrait,     make(   5,  -5,   5,    5,  3,    5,   5,   5,  0,  8));
+    map.emplace_back(PresetFilterId::SoftSkin,     make(   8, -10,  -5,    8,  5,   10,  10,   0, 10, 10));
+    map.emplace_back(PresetFilterId::WarmPortrait, make(   8,  -3,   5,   18,  8,    5,   8,   5,  5, 10));
+
+    // Film & Vintage
     map.emplace_back(PresetFilterId::Vintage,      make(   5, -10, -20,   15, 10,  -10,  10,   0, 20, 15));
+    map.emplace_back(PresetFilterId::Polaroid,     make(  10, -10, -10,   12,  8,    5,  15,   0, 20, 10));
+    map.emplace_back(PresetFilterId::Kodachrome,   make(   5,  15,  15,   10,  5,  -10,  10,  10,  0, 12));
+    map.emplace_back(PresetFilterId::Retro,        make(   8, -10, -15,   12, 10,   -8,   5,  -5, 15, 10));
+    map.emplace_back(PresetFilterId::Retro70s,     make(   8,  -5, -15,   20, 15,   -5,  10,   0, 15, 12));
+
+    // Cinematic
+    map.emplace_back(PresetFilterId::Cinematic,    make(  -5,  10,  -8,  -10,  0,  -15,  -5,   0,  5, 20));
+    map.emplace_back(PresetFilterId::TealOrange,   make(   0,  12,   8,  -15,-10,  -15,   5,  15,  0, 10));
+    map.emplace_back(PresetFilterId::Noir,         make( -15,  30, -70,    0,  0,  -25, -10,   0,  5, 35));
+    map.emplace_back(PresetFilterId::FilmNoir,     make( -10,  25, -60,    0,  0,  -20,  -5,   0, 10, 30));
+    map.emplace_back(PresetFilterId::Moody,        make( -10,  15, -12,   -5,  5,  -20, -10,   0, 10, 25));
+
+    // Black & White
+    map.emplace_back(PresetFilterId::Desaturated,  make(   0,   5, -40,    0,  0,    0,   0, -20,  0,  0));
+    map.emplace_back(PresetFilterId::BWClassic,    make(   0,  10, -100,   0,  0,    0,   0,   0,  0,  0));
+    map.emplace_back(PresetFilterId::BWHigh,       make(   0,  30, -100,   0,  0,  -15,  10,   0,  0,  5));
+    map.emplace_back(PresetFilterId::BWSelenium,   make(   5,  15, -100,  12,  8,   -5,   5,   0,  5,  8));
+    map.emplace_back(PresetFilterId::BWInfrared,   make(  15,  25, -100,   0,  0,  -20,  20,   0,  0, 10));
+
+    // Creative
     map.emplace_back(PresetFilterId::WarmSunset,   make(   8,   5,  10,   30,  5,    0,   5,  10,  0, 10));
     map.emplace_back(PresetFilterId::CoolBlue,     make(  -3,   8,  -5,  -25,  0,   -5,  -8,   0,  0,  5));
-    map.emplace_back(PresetFilterId::Desaturated,  make(   0,   5, -40,    0,  0,    0,   0, -20,  0,  0));
     map.emplace_back(PresetFilterId::HighContrast, make(   0,  30,   5,    0,  0,  -10,  10,   5,  0,  0));
     map.emplace_back(PresetFilterId::SoftPastel,   make(  10, -15, -10,    5,  5,   10,  15,   0, 15,  5));
-    map.emplace_back(PresetFilterId::FilmNoir,     make( -10,  25, -60,    0,  0,  -20,  -5,   0, 10, 30));
     map.emplace_back(PresetFilterId::BleachBypass, make(  -5,  20, -25,    0,  0,  -15,   5,   0,  5, 10));
     map.emplace_back(PresetFilterId::CrossProcess, make(   5,  10,  15,   10,-10,  -10,  10,  10,  0,  5));
     map.emplace_back(PresetFilterId::OrangeTeal,   make(   0,  10,  10,   20,-15,  -15,   5,  15,  0,  8));
-    map.emplace_back(PresetFilterId::Moody,        make( -10,  15, -12,   -5,  5,  -20, -10,   0, 10, 25));
     map.emplace_back(PresetFilterId::Dreamy,       make(  15, -20,  -5,   10, 10,   15,  20,   0, 25, 15));
-    map.emplace_back(PresetFilterId::Retro70s,     make(   8,  -5, -15,   20, 15,   -5,  10,   0, 15, 12));
-    map.emplace_back(PresetFilterId::Polaroid,     make(  10, -10, -10,   12,  8,    5,  15,   0, 20, 10));
     map.emplace_back(PresetFilterId::Hdr,          make(   0,  25,  10,    0,  0,  -20,  20,  15,  0,  5));
     map.emplace_back(PresetFilterId::Matte,        make(   5,  -5, -10,    0,  0,   15, -10,   0, 30,  8));
     map.emplace_back(PresetFilterId::Cyberpunk,    make( -10,  20,  20,  -20,-10,  -15,   5,  20,  0, 20));
@@ -192,6 +221,8 @@ void EffectColorDelegate::setTransitionIn(int clipId, const ClipTransition& t) {
         VideoClip u = c; u.transitionIn = t; return u;
     });
     ops_->pushUndo(before);
+    ops_->syncEffectsToEngine(clipId);
+    ops_->debouncedRenderFrame();
 }
 
 void EffectColorDelegate::setTransitionOut(int clipId, const ClipTransition& t) {
@@ -203,6 +234,8 @@ void EffectColorDelegate::setTransitionOut(int clipId, const ClipTransition& t) 
         VideoClip u = c; u.transitionOut = t; return u;
     });
     ops_->pushUndo(before);
+    ops_->syncEffectsToEngine(clipId);
+    ops_->debouncedRenderFrame();
 }
 
 void EffectColorDelegate::removeTransitionIn(int clipId) {
@@ -221,6 +254,7 @@ void EffectColorDelegate::setClipOpacity(int clipId, double opacity) {
     ops_->updateClip(clipId, [opacity](const VideoClip& c) {
         VideoClip u = c; u.opacity = std::clamp(opacity, 0.0, 1.0); return u;
     });
+    ops_->syncEffectsToEngine(clipId);
     ops_->debouncedRenderFrame();
 }
 

@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QString>
 #include <QDateTime>
+#include <QVariantList>
 #include <vector>
 
 namespace gopost::video_editor {
@@ -57,8 +58,18 @@ public:
     Q_INVOKABLE void deleteProject(const QString& projectId);
     Q_INVOKABLE void autoSave(const QString& projectId, const QString& projectJson);
 
+    // Template save/load
+    Q_INVOKABLE void saveTemplate(const QString& projectJson, const QString& name,
+                                   const QString& description, const QString& category,
+                                   const QString& tags);
+    Q_INVOKABLE QVariantList loadTemplates();
+    Q_INVOKABLE QString loadTemplate(const QString& templateId);
+    Q_INVOKABLE void deleteTemplate(const QString& templateId);
+
 signals:
     void stateChanged();
+    void templateSaved();
+    void templateSaveError(const QString& message);
 
 private:
     ProjectListState state_;

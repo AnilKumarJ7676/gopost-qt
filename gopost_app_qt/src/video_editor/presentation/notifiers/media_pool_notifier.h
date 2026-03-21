@@ -46,6 +46,12 @@ class MediaPoolNotifier : public QObject {
     Q_PROPERTY(QString searchQuery READ searchQuery NOTIFY stateChanged)
     Q_PROPERTY(QVariantList filteredAssets READ filteredAssetsVariant NOTIFY stateChanged)
     Q_PROPERTY(QString currentFilter READ currentFilter NOTIFY stateChanged)
+    Q_PROPERTY(QString binBreadcrumb READ binBreadcrumb NOTIFY stateChanged)
+    Q_PROPERTY(QString activeBinId   READ activeBinId   NOTIFY stateChanged)
+    Q_PROPERTY(QVariantList bins     READ binsVariant    NOTIFY stateChanged)
+    Q_PROPERTY(int selectedAssetCount READ selectedAssetCount NOTIFY selectionChanged)
+    Q_PROPERTY(QVariantList selectedAssetIds READ selectedAssetIdsVariant NOTIFY selectionChanged)
+    Q_PROPERTY(int selectionGeneration READ selectionGeneration NOTIFY selectionChanged)
 
 public:
     explicit MediaPoolNotifier(QObject* parent = nullptr);
@@ -68,8 +74,24 @@ public:
     Q_INVOKABLE void relinkAsset(const QString& assetId, const QString& newPath);
     Q_INVOKABLE void checkAllAssetsOnline();
     Q_INVOKABLE void selectAsset(const QString& assetId);
+    Q_INVOKABLE void toggleAssetSelection(const QString& assetId);
+    Q_INVOKABLE void rangeSelectAsset(const QString& assetId);
+    Q_INVOKABLE void selectAllInBin();
+    Q_INVOKABLE void deselectAll();
+    Q_INVOKABLE bool isAssetSelected(const QString& assetId) const;
+    int selectedAssetCount() const { return selectedAssetIds_.size(); }
+    int selectionGeneration() const { return selectionGeneration_; }
+    QVariantList selectedAssetIdsVariant() const;
     Q_INVOKABLE void addToTimeline(const QString& assetId);
     Q_INVOKABLE void showFilePicker();
+    Q_INVOKABLE void importFolder(const QString& path);
+    Q_INVOKABLE void renameAsset(const QString& assetId, const QString& newName);
+    Q_INVOKABLE void revealInExplorer(const QString& assetId);
+    Q_INVOKABLE void navigateIntoBin(const QString& binId);
+    Q_INVOKABLE void navigateUp();
+    QString binBreadcrumb() const;
+    QString activeBinId() const;
+    QVariantList binsVariant() const;
 
     // ---- bins -------------------------------------------------------------
     Q_INVOKABLE void createBin(const QString& name);
@@ -89,6 +111,7 @@ public:
 
     // ---- query -------------------------------------------------------------
     Q_INVOKABLE double durationForPath(const QString& path) const;
+    Q_INVOKABLE bool validateBatchSize(int count) const;
 
     // ---- persistence -------------------------------------------------------
     Q_INVOKABLE void loadFromData(const QVariantList& data);
@@ -96,14 +119,22 @@ public:
 
 signals:
     void stateChanged();
+    void selectionChanged();
     void filePickerRequested();
     void addToTimelineRequested(const QString& assetId, const QString& filePath,
                                 const QString& mediaType, const QString& displayName,
                                 double duration);
+    void importRejected(const QString& fileName, const QString& reason);
+    void duplicateDetected(const QString& fileName);
+    void batchTooLarge(int count, int maxAllowed) const;
+    void importBatchCompleted(int succeeded, int failed, const QStringList& failedNames);
 
 private:
     MediaPoolState state_;
-    QString selectedAssetId_;
+    QString selectedAssetId_;             // last-clicked asset (for range selection anchor)
+    QSet<QString> selectedAssetIds_;      // multi-select set
+    QMap<QString, QSet<QString>> binSelections_;  // per-bin selection preservation
+    int selectionGeneration_ = 0;
     QString generateAssetId() const;
     void probeMediaMetadata(MediaAsset& asset);
 };

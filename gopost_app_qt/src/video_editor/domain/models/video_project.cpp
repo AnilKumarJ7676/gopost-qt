@@ -120,6 +120,27 @@ VideoClip VideoClip::copyWith(const CopyWithOpts& o) const {
         .linkedClipId = o.clearLinkedClipId ? std::nullopt : (o.linkedClipId.has_value() ? o.linkedClipId : linkedClipId),
         .colorTag = o.clearColorTag ? std::nullopt : (o.colorTag.has_value() ? o.colorTag : colorTag),
         .customLabel = o.customLabel.value_or(customLabel),
+        .positionX = o.positionX.value_or(positionX),
+        .positionY = o.positionY.value_or(positionY),
+        .scaleX = o.scaleX.value_or(scaleX),
+        .scaleY = o.scaleY.value_or(scaleY),
+        .rotation = o.rotation.value_or(rotation),
+        .cropLeft = o.cropLeft.value_or(cropLeft),
+        .cropTop = o.cropTop.value_or(cropTop),
+        .cropRight = o.cropRight.value_or(cropRight),
+        .cropBottom = o.cropBottom.value_or(cropBottom),
+        .textContent = o.textContent.value_or(textContent),
+        .fontFamily = o.fontFamily.value_or(fontFamily),
+        .fontSize = o.fontSize.value_or(fontSize),
+        .fontColor = o.fontColor.value_or(fontColor),
+        .textAlignment = o.textAlignment.value_or(textAlignment),
+        .sourceDuration = o.sourceDuration.value_or(sourceDuration),
+        .isFreezeFrame = o.isFreezeFrame.value_or(isFreezeFrame),
+        .isDisabled = o.isDisabled.value_or(isDisabled),
+        .isPlaceholder = o.isPlaceholder.value_or(isPlaceholder),
+        .placeholderLabel = o.placeholderLabel.value_or(placeholderLabel),
+        .connectedToPrimaryClipId = o.clearConnectedToPrimaryClipId ? std::nullopt : (o.connectedToPrimaryClipId.has_value() ? o.connectedToPrimaryClipId : connectedToPrimaryClipId),
+        .syncPointOffset = o.syncPointOffset.has_value() ? o.syncPointOffset : syncPointOffset,
     };
 }
 
@@ -163,6 +184,44 @@ QJsonObject VideoClip::toMap() const {
         obj[QStringLiteral("colorTag")] = *colorTag;
     if (!customLabel.isEmpty())
         obj[QStringLiteral("customLabel")] = customLabel;
+
+    // Transform (only non-default values)
+    if (positionX != 0.0) obj[QStringLiteral("positionX")] = positionX;
+    if (positionY != 0.0) obj[QStringLiteral("positionY")] = positionY;
+    if (scaleX != 1.0) obj[QStringLiteral("scaleX")] = scaleX;
+    if (scaleY != 1.0) obj[QStringLiteral("scaleY")] = scaleY;
+    if (rotation != 0.0) obj[QStringLiteral("rotation")] = rotation;
+    if (cropLeft != 0.0) obj[QStringLiteral("cropLeft")] = cropLeft;
+    if (cropTop != 0.0) obj[QStringLiteral("cropTop")] = cropTop;
+    if (cropRight != 0.0) obj[QStringLiteral("cropRight")] = cropRight;
+    if (cropBottom != 0.0) obj[QStringLiteral("cropBottom")] = cropBottom;
+
+    // Text content (for Title/Subtitle clips)
+    if (!textContent.isEmpty()) obj[QStringLiteral("textContent")] = textContent;
+    if (!fontFamily.isEmpty()) obj[QStringLiteral("fontFamily")] = fontFamily;
+    if (fontSize != 24.0) obj[QStringLiteral("fontSize")] = fontSize;
+    if (fontColor != QStringLiteral("#FFFFFF")) obj[QStringLiteral("fontColor")] = fontColor;
+    if (textAlignment != 1) obj[QStringLiteral("textAlignment")] = textAlignment;
+
+    // Source duration
+    if (sourceDuration > 0.0) obj[QStringLiteral("sourceDuration")] = sourceDuration;
+
+    // Freeze frame
+    if (isFreezeFrame) obj[QStringLiteral("isFreezeFrame")] = true;
+
+    // Disabled clip
+    if (isDisabled) obj[QStringLiteral("isDisabled")] = true;
+
+    // Template placeholder
+    if (isPlaceholder) obj[QStringLiteral("isPlaceholder")] = true;
+    if (!placeholderLabel.isEmpty()) obj[QStringLiteral("placeholderLabel")] = placeholderLabel;
+
+    // Magnetic timeline connected clip
+    if (connectedToPrimaryClipId.has_value())
+        obj[QStringLiteral("connectedToPrimaryClipId")] = *connectedToPrimaryClipId;
+    if (syncPointOffset.has_value())
+        obj[QStringLiteral("syncPointOffset")] = *syncPointOffset;
+
     return obj;
 }
 
@@ -209,6 +268,44 @@ VideoClip VideoClip::fromMap(const QJsonObject& m) {
     if (m.contains(QStringLiteral("colorTag")))
         clip.colorTag = m.value(QStringLiteral("colorTag")).toString();
     clip.customLabel = m.value(QStringLiteral("customLabel")).toString();
+
+    // Transform
+    clip.positionX = m.value(QStringLiteral("positionX")).toDouble(0.0);
+    clip.positionY = m.value(QStringLiteral("positionY")).toDouble(0.0);
+    clip.scaleX = m.value(QStringLiteral("scaleX")).toDouble(1.0);
+    clip.scaleY = m.value(QStringLiteral("scaleY")).toDouble(1.0);
+    clip.rotation = m.value(QStringLiteral("rotation")).toDouble(0.0);
+    clip.cropLeft = m.value(QStringLiteral("cropLeft")).toDouble(0.0);
+    clip.cropTop = m.value(QStringLiteral("cropTop")).toDouble(0.0);
+    clip.cropRight = m.value(QStringLiteral("cropRight")).toDouble(0.0);
+    clip.cropBottom = m.value(QStringLiteral("cropBottom")).toDouble(0.0);
+
+    // Text
+    clip.textContent = m.value(QStringLiteral("textContent")).toString();
+    clip.fontFamily = m.value(QStringLiteral("fontFamily")).toString();
+    clip.fontSize = m.value(QStringLiteral("fontSize")).toDouble(24.0);
+    clip.fontColor = m.value(QStringLiteral("fontColor")).toString(QStringLiteral("#FFFFFF"));
+    clip.textAlignment = m.value(QStringLiteral("textAlignment")).toInt(1);
+
+    // Source duration
+    clip.sourceDuration = m.value(QStringLiteral("sourceDuration")).toDouble(0.0);
+
+    // Freeze frame
+    clip.isFreezeFrame = m.value(QStringLiteral("isFreezeFrame")).toBool(false);
+
+    // Disabled clip
+    clip.isDisabled = m.value(QStringLiteral("isDisabled")).toBool(false);
+
+    // Placeholder
+    clip.isPlaceholder = m.value(QStringLiteral("isPlaceholder")).toBool(false);
+    clip.placeholderLabel = m.value(QStringLiteral("placeholderLabel")).toString();
+
+    // Magnetic timeline connected clip
+    if (m.contains(QStringLiteral("connectedToPrimaryClipId")))
+        clip.connectedToPrimaryClipId = m.value(QStringLiteral("connectedToPrimaryClipId")).toInt();
+    if (m.contains(QStringLiteral("syncPointOffset")))
+        clip.syncPointOffset = m.value(QStringLiteral("syncPointOffset")).toDouble();
+
     return clip;
 }
 
@@ -226,6 +323,8 @@ VideoTrack VideoTrack::copyWith(const CopyWithOpts& o) const {
         .clips = o.clips.value_or(clips),
         .audioSettings = o.audioSettings.value_or(audioSettings),
         .color = o.clearColor ? std::nullopt : (o.color.has_value() ? o.color : color),
+        .trackHeight = o.trackHeight.value_or(trackHeight),
+        .isMagneticPrimary = o.isMagneticPrimary.value_or(isMagneticPrimary),
     };
 }
 
@@ -245,6 +344,10 @@ QJsonObject VideoTrack::toMap() const {
     };
     if (color.has_value())
         obj[QStringLiteral("color")] = *color;
+    if (trackHeight != 64.0)
+        obj[QStringLiteral("trackHeight")] = trackHeight;
+    if (isMagneticPrimary)
+        obj[QStringLiteral("isMagneticPrimary")] = true;
     return obj;
 }
 
@@ -257,6 +360,7 @@ VideoTrack VideoTrack::fromMap(const QJsonObject& m) {
     track.isLocked = m.value(QStringLiteral("isLocked")).toBool(false);
     track.isMuted = m.value(QStringLiteral("isMuted")).toBool(false);
     track.isSolo = m.value(QStringLiteral("isSolo")).toBool(false);
+    track.trackHeight = m.value(QStringLiteral("trackHeight")).toDouble(64.0);
 
     const auto clipsArr = m.value(QStringLiteral("clips")).toArray();
     for (const auto& v : clipsArr)
@@ -266,6 +370,7 @@ VideoTrack VideoTrack::fromMap(const QJsonObject& m) {
         track.audioSettings = TrackAudioSettings::fromMap(m.value(QStringLiteral("audioSettings")).toObject());
     if (m.contains(QStringLiteral("color")))
         track.color = m.value(QStringLiteral("color")).toString();
+    track.isMagneticPrimary = m.value(QStringLiteral("isMagneticPrimary")).toBool(false);
     return track;
 }
 

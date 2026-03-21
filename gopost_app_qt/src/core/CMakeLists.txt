@@ -14,6 +14,12 @@ add_library(gopost_core_lib STATIC
     network/interceptors/ssl_pinning_interceptor.cpp
     navigation/router.cpp
     di/service_locator.cpp
+    engines/platform_capability_engine.cpp
+    engines/memory_management_engine.cpp
+    engines/logging_engine.cpp
+    engines/configuration_engine.cpp
+    engines/diagnostics_engine.cpp
+    engines/event_bus_engine.cpp
 )
 
 target_include_directories(gopost_core_lib PUBLIC ${CMAKE_SOURCE_DIR}/src)

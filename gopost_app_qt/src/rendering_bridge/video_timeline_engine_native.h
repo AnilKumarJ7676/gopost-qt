@@ -252,7 +252,7 @@ public:
     void setClipColorGrading(int timelineId, int clipId, double brightness,
         double contrast, double saturation, double exposure,
         double temperature, double tint, double highlights, double shadows,
-        double vibrance, double hue) override;
+        double vibrance, double hue, double fade, double vignette) override;
     void clearClipEffects(int timelineId, int clipId) override;
     void setClipPan(int timelineId, int clipId, double pan) override;
     void setClipFadeIn(int timelineId, int clipId, double seconds) override;

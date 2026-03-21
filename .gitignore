@@ -1,5 +1,6 @@
 # Qt / C++ Build
 gopost_app_qt/build/
+gopost_app_qt/build-android/
 native/build/
 native/cmake-build-*/
 native/*/build/

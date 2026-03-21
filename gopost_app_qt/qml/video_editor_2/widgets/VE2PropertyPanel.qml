@@ -262,12 +262,12 @@ Item {
                 contentHeight: fxCol.implicitHeight + 20
                 clip: true; boundsBehavior: Flickable.StopAtBounds
 
-                // Live effect state from engine — re-reads on every track/selection change
-                // root._gen (trackGeneration) is bumped by every clip mutation
+                // Live effect state — bound to clipEffectsList Q_PROPERTY (NOTIFY selectionChanged)
+                // Falls back to _gen-based refresh for track mutations
                 property var fxList: {
-                    var g = _gen  // force re-evaluation when generation changes
                     if (!hasClip || !timelineNotifier) return []
-                    return timelineNotifier.clipEffects(selClip)
+                    var g = _gen  // also depend on trackGeneration for add/remove/toggle
+                    return timelineNotifier.clipEffectsList
                 }
 
                 function fxValue(effectType) {
@@ -296,37 +296,37 @@ Item {
                     return n
                 }
 
-                // All 22 effects by category, matching C++ EffectType enum
+                // All 22 effects by category, matching C++ EffectType enum + effectTypeInfo ranges
                 readonly property var fxCategories: [
                     { label: "COLOR & TONE", color: "#FF7043", effects: [
-                        { type: 0,  name: "Brightness",  min: 0, max: 100 },
-                        { type: 1,  name: "Contrast",    min: 0, max: 100 },
-                        { type: 2,  name: "Saturation",  min: 0, max: 100 },
-                        { type: 3,  name: "Exposure",    min: 0, max: 100 },
-                        { type: 4,  name: "Temperature", min: 0, max: 100 },
-                        { type: 5,  name: "Tint",        min: 0, max: 100 },
-                        { type: 6,  name: "Highlights",  min: 0, max: 100 },
-                        { type: 7,  name: "Shadows",     min: 0, max: 100 },
-                        { type: 8,  name: "Vibrance",    min: 0, max: 100 },
-                        { type: 9,  name: "Hue Rotate",  min: 0, max: 100 }
+                        { type: 0,  name: "Brightness",  min: -100, max: 100, def: 0 },
+                        { type: 1,  name: "Contrast",    min: -100, max: 100, def: 0 },
+                        { type: 2,  name: "Saturation",  min: -100, max: 100, def: 0 },
+                        { type: 3,  name: "Exposure",    min: -2.0, max: 2.0, def: 0 },
+                        { type: 4,  name: "Temperature", min: -100, max: 100, def: 0 },
+                        { type: 5,  name: "Tint",        min: -100, max: 100, def: 0 },
+                        { type: 6,  name: "Highlights",  min: -100, max: 100, def: 0 },
+                        { type: 7,  name: "Shadows",     min: -100, max: 100, def: 0 },
+                        { type: 8,  name: "Vibrance",    min: -100, max: 100, def: 0 },
+                        { type: 9,  name: "Hue Rotate",  min: -180, max: 180, def: 0 }
                     ]},
                     { label: "BLUR & SHARPEN", color: "#26C6DA", effects: [
-                        { type: 10, name: "Gaussian Blur", min: 0, max: 100 },
-                        { type: 11, name: "Radial Blur",   min: 0, max: 100 },
-                        { type: 12, name: "Tilt Shift",    min: 0, max: 100 },
-                        { type: 13, name: "Sharpen",       min: 0, max: 100 }
+                        { type: 10, name: "Gaussian Blur", min: 0, max: 100, def: 25 },
+                        { type: 11, name: "Radial Blur",   min: 0, max: 100, def: 25 },
+                        { type: 12, name: "Tilt Shift",    min: 0, max: 100, def: 50 },
+                        { type: 13, name: "Sharpen",       min: 0, max: 100, def: 50 }
                     ]},
                     { label: "DISTORT", color: "#EF5350", effects: [
-                        { type: 14, name: "Pixelate",   min: 1, max: 50 },
-                        { type: 15, name: "Glitch",     min: 0, max: 100 },
-                        { type: 16, name: "Chromatic",  min: 0, max: 100 }
+                        { type: 14, name: "Pixelate",   min: 1,  max: 50,  def: 8 },
+                        { type: 15, name: "Glitch",     min: 0,  max: 100, def: 30 },
+                        { type: 16, name: "Chromatic",  min: 0,  max: 100, def: 25 }
                     ]},
                     { label: "STYLIZE", color: "#AB47BC", effects: [
-                        { type: 17, name: "Vignette",   min: 0, max: 100 },
-                        { type: 18, name: "Film Grain",  min: 0, max: 100 },
-                        { type: 19, name: "Sepia",      min: 0, max: 100 },
-                        { type: 20, name: "Invert",     min: 0, max: 100 },
-                        { type: 21, name: "Posterize",  min: 2, max: 16 }
+                        { type: 17, name: "Vignette",   min: 0, max: 100, def: 40 },
+                        { type: 18, name: "Film Grain",  min: 0, max: 100, def: 30 },
+                        { type: 19, name: "Sepia",      min: 0, max: 100, def: 50 },
+                        { type: 20, name: "Invert",     min: 0, max: 100, def: 100 },
+                        { type: 21, name: "Posterize",  min: 2, max: 16,  def: 8 }
                     ]}
                 ]
 
@@ -335,7 +335,7 @@ Item {
                     width: parent.width - 16; x: 8; y: 8
                     spacing: 6
 
-                    // Active effects summary
+                    // Active effects summary + copy/paste
                     Rectangle {
                         Layout.fillWidth: true; height: 30; radius: 4
                         color: "#14142B"
@@ -356,20 +356,108 @@ Item {
                                 font.pixelSize: 11; font.weight: Font.DemiBold; color: "#8888A0"
                                 Layout.fillWidth: true
                             }
+                            // Copy effects
+                            Rectangle {
+                                visible: fxFlickable.fxList.length > 0
+                                width: copyLbl.implicitWidth + 12; height: 22; radius: 4
+                                color: Qt.rgba(0.424, 0.388, 1.0, 0.15)
+                                border.color: Qt.rgba(0.424, 0.388, 1.0, 0.3)
+                                Label { id: copyLbl; anchors.centerIn: parent; text: "Copy"; font.pixelSize: 10; color: "#6C63FF" }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (timelineNotifier && hasClip) timelineNotifier.copyEffects(selClip) } }
+                            }
+                            // Paste effects
+                            Rectangle {
+                                visible: timelineNotifier ? timelineNotifier.hasClipboardEffects() : false
+                                width: pasteLbl.implicitWidth + 12; height: 22; radius: 4
+                                color: Qt.rgba(0.424, 0.388, 1.0, 0.15)
+                                border.color: Qt.rgba(0.424, 0.388, 1.0, 0.3)
+                                Label { id: pasteLbl; anchors.centerIn: parent; text: "Paste"; font.pixelSize: 10; color: "#6C63FF" }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (timelineNotifier && hasClip) timelineNotifier.pasteEffects(selClip) } }
+                            }
                             // Clear all
                             Rectangle {
                                 visible: fxFlickable.fxList.length > 0
                                 width: clearLbl.implicitWidth + 12; height: 22; radius: 4
                                 color: Qt.rgba(0.94, 0.32, 0.31, 0.15)
                                 border.color: Qt.rgba(0.94, 0.32, 0.31, 0.3)
+                                Label { id: clearLbl; anchors.centerIn: parent; text: "Clear All"; font.pixelSize: 10; color: "#EF5350" }
+                                MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (timelineNotifier && hasClip) timelineNotifier.clearEffects(selClip) } }
+                            }
+                        }
+                    }
 
+                    // Effects Stack — shows active effects in processing order with reorder controls
+                    SectionHeader { text: "Effects Stack (Processing Order)"; visible: fxFlickable.fxList.length > 0 }
+
+                    Repeater {
+                        model: fxFlickable.fxList.length > 0 ? fxFlickable.fxList : []
+                        delegate: Rectangle {
+                            Layout.fillWidth: true; height: 28; radius: 4
+                            color: modelData.enabled ? Qt.rgba(0.424, 0.388, 1.0, 0.06) : Qt.rgba(0.3, 0.3, 0.3, 0.06)
+                            border.color: modelData.enabled ? "#6C63FF" : "#303050"
+                            border.width: 0.5
+
+                            property int fxIndex: index
+                            property var fxNames: ["Brightness","Contrast","Saturation","Exposure","Temperature","Tint","Highlights","Shadows","Vibrance","Hue Rotate","Gaussian Blur","Radial Blur","Tilt Shift","Sharpen","Pixelate","Glitch","Chromatic","Vignette","Film Grain","Sepia","Invert","Posterize"]
+
+                            RowLayout {
+                                anchors.fill: parent; anchors.leftMargin: 4; anchors.rightMargin: 4; spacing: 3
+
+                                // Stack index
                                 Label {
-                                    id: clearLbl; anchors.centerIn: parent
-                                    text: "Clear All"; font.pixelSize: 10; color: "#EF5350"
+                                    text: (fxIndex + 1) + "."
+                                    font.pixelSize: 9; font.family: "monospace"; color: "#505068"
+                                    Layout.preferredWidth: 16
                                 }
-                                MouseArea {
-                                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                                    onClicked: { if (timelineNotifier && hasClip) timelineNotifier.clearEffects(selClip) }
+
+                                // Enable/disable toggle
+                                Rectangle {
+                                    width: 16; height: 16; radius: 3
+                                    color: modelData.enabled ? Qt.rgba(0.424, 0.388, 1.0, 0.2) : "transparent"
+                                    border.color: modelData.enabled ? "#6C63FF" : "#404060"
+                                    Label { anchors.centerIn: parent; text: modelData.enabled ? "\u2713" : "\u2012"; font.pixelSize: 10; color: modelData.enabled ? "#6C63FF" : "#505068" }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (timelineNotifier && hasClip) timelineNotifier.toggleEffect(selClip, modelData.type) } }
+                                }
+
+                                // Effect name
+                                Label {
+                                    text: modelData.type < fxNames.length ? fxNames[modelData.type] : "Effect"
+                                    font.pixelSize: 10; color: modelData.enabled ? "#D0D0E8" : "#6B6B88"
+                                    Layout.fillWidth: true; elide: Text.ElideRight
+                                }
+
+                                // Value readout
+                                Label {
+                                    text: Math.round(modelData.value)
+                                    font.pixelSize: 9; font.family: "monospace"; color: "#8888A0"
+                                    Layout.preferredWidth: 24; horizontalAlignment: Text.AlignRight
+                                }
+
+                                // Move up
+                                Rectangle {
+                                    visible: fxIndex > 0
+                                    width: 16; height: 16; radius: 3; color: "transparent"; border.color: "#353550"
+                                    Label { anchors.centerIn: parent; text: "\u25B2"; font.pixelSize: 8; color: "#8888A0" }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (timelineNotifier && hasClip) timelineNotifier.reorderEffect(selClip, fxIndex, fxIndex - 1) } }
+                                    ToolTip.visible: upHov.hovered; ToolTip.text: "Move up in stack"
+                                    HoverHandler { id: upHov }
+                                }
+
+                                // Move down
+                                Rectangle {
+                                    visible: fxIndex < fxFlickable.fxList.length - 1
+                                    width: 16; height: 16; radius: 3; color: "transparent"; border.color: "#353550"
+                                    Label { anchors.centerIn: parent; text: "\u25BC"; font.pixelSize: 8; color: "#8888A0" }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (timelineNotifier && hasClip) timelineNotifier.reorderEffect(selClip, fxIndex, fxIndex + 1) } }
+                                    ToolTip.visible: downHov.hovered; ToolTip.text: "Move down in stack"
+                                    HoverHandler { id: downHov }
+                                }
+
+                                // Delete
+                                Rectangle {
+                                    width: 16; height: 16; radius: 3; color: "transparent"
+                                    Label { anchors.centerIn: parent; text: "\u2715"; font.pixelSize: 8; color: "#EF5350" }
+                                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: { if (timelineNotifier && hasClip) timelineNotifier.removeEffect(selClip, modelData.type) } }
                                 }
                             }
                         }
@@ -427,8 +515,11 @@ Item {
                                         var list = fxFlickable.fxList
                                         for (var i = 0; i < list.length; i++)
                                             if (list[i].type === fxType) return list[i].value
-                                        return 50
+                                        return modelData.def
                                     }
+                                    // Re-sync slider when fxVal changes externally (binding break fix)
+                                    onFxValChanged: if (fxIsActive) fxSlider.value = fxVal
+                                    onFxIsActiveChanged: fxSlider.value = fxIsActive ? fxVal : modelData.min
 
                                     RowLayout {
                                         anchors.fill: parent; anchors.leftMargin: 4; anchors.rightMargin: 4; spacing: 4
@@ -461,7 +552,7 @@ Item {
                                                     if (fxIsActive)
                                                         timelineNotifier.toggleEffect(selClip, fxType)
                                                     else
-                                                        timelineNotifier.addEffect(selClip, fxType, 50)
+                                                        timelineNotifier.addEffect(selClip, fxType, modelData.def)
                                                 }
                                             }
                                             ToolTip.visible: toggleHov.hovered
@@ -485,6 +576,7 @@ Item {
                                             from: modelData.min; to: modelData.max
                                             value: fxIsActive ? fxVal : modelData.min
                                             enabled: fxIsActive && fxIsEnabled
+                                            stepSize: Math.abs(modelData.max - modelData.min) > 10 ? 1 : 0.01
 
                                             onMoved: {
                                                 if (timelineNotifier && hasClip)
@@ -501,6 +593,14 @@ Item {
                                                     height: parent.height; radius: 1.5
                                                     color: fxSlider.enabled ? "#6C63FF" : "#303050"
                                                 }
+                                            }
+                                            handle: Rectangle {
+                                                x: fxSlider.leftPadding + fxSlider.visualPosition * (fxSlider.availableWidth - width)
+                                                y: fxSlider.topPadding + fxSlider.availableHeight / 2 - height / 2
+                                                width: 12; height: 12; radius: 6
+                                                color: fxSlider.pressed ? "#8A83FF" : (fxSlider.enabled ? "#6C63FF" : "#404060")
+                                                border.color: fxSlider.pressed ? "#AEA8FF" : (fxSlider.enabled ? "#8A83FF" : "#505070")
+                                                border.width: 1
                                             }
                                         }
 
@@ -664,21 +764,25 @@ Item {
 
                     Repeater {
                         model: [
-                            { prop: "brightness", label: "Brightness", from: -1, to: 1 },
-                            { prop: "contrast", label: "Contrast", from: -1, to: 1 },
-                            { prop: "saturation", label: "Saturation", from: -1, to: 1 },
-                            { prop: "temperature", label: "Temperature", from: -1, to: 1 },
-                            { prop: "tint", label: "Tint", from: -1, to: 1 },
-                            { prop: "highlights", label: "Highlights", from: -1, to: 1 },
-                            { prop: "shadows", label: "Shadows", from: -1, to: 1 },
-                            { prop: "vibrance", label: "Vibrance", from: -1, to: 1 }
+                            { prop: "brightness", label: "Brightness", from: -100, to: 100 },
+                            { prop: "contrast", label: "Contrast", from: -100, to: 100 },
+                            { prop: "saturation", label: "Saturation", from: -100, to: 100 },
+                            { prop: "exposure", label: "Exposure", from: -100, to: 100 },
+                            { prop: "temperature", label: "Temperature", from: -100, to: 100 },
+                            { prop: "tint", label: "Tint", from: -100, to: 100 },
+                            { prop: "highlights", label: "Highlights", from: -100, to: 100 },
+                            { prop: "shadows", label: "Shadows", from: -100, to: 100 },
+                            { prop: "vibrance", label: "Vibrance", from: -100, to: 100 },
+                            { prop: "hue", label: "Hue", from: -180, to: 180 },
+                            { prop: "fade", label: "Fade", from: 0, to: 100 },
+                            { prop: "vignette", label: "Vignette", from: 0, to: 100 }
                         ]
                         delegate: PropSlider {
                             label: modelData.label
                             from: modelData.from; to: modelData.to
                             value: {
                                 if (!timelineNotifier || !hasClip) return 0
-                                var g = _gen; var cg = timelineNotifier.clipColorGrading(selClip)
+                                var cg = timelineNotifier.clipColorGradingMap
                                 return cg[modelData.prop] !== undefined ? cg[modelData.prop] : 0
                             }
                             onUserMoved: val => {
@@ -1310,6 +1414,14 @@ Item {
                                 width: trDurationSlider.availableWidth; height: 3; radius: 1.5; color: "#1A1A34"
                                 Rectangle { width: trDurationSlider.visualPosition * parent.width; height: parent.height; radius: 1.5; color: "#6C63FF" }
                             }
+                            handle: Rectangle {
+                                x: trDurationSlider.leftPadding + trDurationSlider.visualPosition * (trDurationSlider.availableWidth - width)
+                                y: trDurationSlider.topPadding + trDurationSlider.availableHeight / 2 - height / 2
+                                width: 14; height: 14; radius: 7
+                                color: trDurationSlider.pressed ? "#8A83FF" : "#6C63FF"
+                                border.color: trDurationSlider.pressed ? "#AEA8FF" : "#8A83FF"
+                                border.width: 1
+                            }
                         }
                     }
 
@@ -1378,12 +1490,21 @@ Item {
         property real value: 0
         signal userMoved(real val)
 
+        // Re-sync slider when value changes externally (fixes binding break after user drag)
+        onValueChanged: sldr.value = value
+
         Layout.fillWidth: true; spacing: 2
 
         RowLayout {
             spacing: 4
             Label { text: parent.parent.label; font.pixelSize: 11; color: "#8888A0"; Layout.fillWidth: true }
-            Label { text: sldr.value.toFixed(2); font.pixelSize: 10; font.family: "monospace"; color: "#6B6B88" }
+            Label {
+                text: {
+                    var absRange = Math.abs(parent.parent.to - parent.parent.from)
+                    return absRange > 10 ? Math.round(sldr.value).toString() : sldr.value.toFixed(2)
+                }
+                font.pixelSize: 10; font.family: "monospace"; color: "#6B6B88"
+            }
         }
 
         Slider {
@@ -1396,6 +1517,14 @@ Item {
                 x: sldr.leftPadding; y: sldr.topPadding + sldr.availableHeight / 2 - 1.5
                 width: sldr.availableWidth; height: 3; radius: 1.5; color: "#1A1A34"
                 Rectangle { width: sldr.visualPosition * parent.width; height: parent.height; radius: 1.5; color: "#6C63FF" }
+            }
+            handle: Rectangle {
+                x: sldr.leftPadding + sldr.visualPosition * (sldr.availableWidth - width)
+                y: sldr.topPadding + sldr.availableHeight / 2 - height / 2
+                width: 14; height: 14; radius: 7
+                color: sldr.pressed ? "#8A83FF" : (sldr.enabled ? "#6C63FF" : "#404060")
+                border.color: sldr.pressed ? "#AEA8FF" : (sldr.enabled ? "#8A83FF" : "#505070")
+                border.width: 1
             }
         }
     }

@@ -55,54 +55,6 @@ Page {
                     Layout.topMargin: 12
                     spacing: 12
 
-                    // Video Editor Card
-                    Rectangle {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 110
-                        radius: 16
-                        gradient: Gradient {
-                            GradientStop { position: 0.0; color: palette.highlight }
-                            GradientStop { position: 1.0; color: Qt.darker(palette.highlight, 1.3) }
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: router.push("/editor/video")
-                        }
-
-                        ColumnLayout {
-                            anchors.fill: parent
-                            anchors.margins: 16
-                            spacing: 8
-
-                            Rectangle {
-                                width: 40; height: 40
-                                radius: 8
-                                color: Qt.rgba(1, 1, 1, 0.2)
-
-                                Label {
-                                    anchors.centerIn: parent
-                                    text: "\ue04b" // videocam icon
-                                    font.pixelSize: 22
-                                    color: "white"
-                                }
-                            }
-
-                            Label {
-                                text: "Video Editor"
-                                font.pixelSize: 14
-                                font.weight: Font.Bold
-                                color: "white"
-                            }
-
-                            Label {
-                                text: "Create & edit videos"
-                                font.pixelSize: 12
-                                color: Qt.rgba(1, 1, 1, 0.8)
-                            }
-                        }
-                    }
-
                     // Image Editor Card
                     Rectangle {
                         Layout.fillWidth: true
@@ -383,7 +335,7 @@ Page {
 
                         onClicked: {
                             if (isVideo)
-                                router.push("/editor/video?projectId=" + modelData.id)
+                                router.push("/editor/video2?projectId=" + modelData.id)
                             else
                                 router.push("/editor/image?projectId=" + modelData.id)
                         }

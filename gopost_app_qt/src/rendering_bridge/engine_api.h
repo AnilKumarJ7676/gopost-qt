@@ -476,7 +476,8 @@ public:
         int timelineId, int clipId, double brightness = 0,
         double contrast = 0, double saturation = 0, double exposure = 0,
         double temperature = 0, double tint = 0, double highlights = 0,
-        double shadows = 0, double vibrance = 0, double hue = 0) = 0;
+        double shadows = 0, double vibrance = 0, double hue = 0,
+        double fade = 0, double vignette = 0) = 0;
     virtual void clearClipEffects(int timelineId, int clipId) = 0;
 
     // --- Audio enhancements (S10) ---

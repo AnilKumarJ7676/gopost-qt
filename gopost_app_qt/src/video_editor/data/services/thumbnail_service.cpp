@@ -32,13 +32,23 @@ void ThumbnailService::probeGpu() {
     hwAccelStatus_ = HwAccelStatus::Probing;
 
     QProcess proc;
+    proc.setProcessChannelMode(QProcess::ForwardedErrorChannel);
     proc.start(QStringLiteral("ffmpeg"), {QStringLiteral("-hwaccels"), QStringLiteral("-hide_banner")});
-    if (!proc.waitForFinished(5000) || proc.exitCode() != 0) {
+
+    QByteArray rawOutput;
+    while (proc.state() != QProcess::NotRunning || proc.bytesAvailable() > 0) {
+        if (proc.bytesAvailable() > 0) {
+            rawOutput.append(proc.read(proc.bytesAvailable()));
+        } else if (!proc.waitForReadyRead(5000)) {
+            break;
+        }
+    }
+    if (proc.exitCode() != 0) {
         hwAccelStatus_ = HwAccelStatus::Unavailable;
         return;
     }
 
-    const auto output = QString::fromUtf8(proc.readAllStandardOutput());
+    const auto output = QString::fromUtf8(rawOutput);
     const auto lines = output.split(QLatin1Char('\n'));
 
     // Priority: NVIDIA CUDA > D3D11VA > DXVA2 > QSV > VAAPI > VideoToolbox
@@ -203,8 +213,10 @@ std::optional<QByteArray> ThumbnailService::extractSingleThumbnail(
         return bytes;
     }
 
-    const auto cmd = QStringLiteral(
-        R"(-nostdin -y %1-ss %2 -i "%3" -frames:v 1 -update 1 -s %4x%5 -q:v 6 "%6")")
+    // Use system() instead of FfmpegRunner to avoid QProcess QRingBuffer overflow
+    QString sysCmd = QStringLiteral(
+        "ffmpeg -nostdin -y -loglevel quiet %1-ss %2 -i \"%3\" "
+        "-frames:v 1 -update 1 -s %4x%5 -q:v 6 \"%6\"")
         .arg(hwaccelArgs())
         .arg(timeSeconds, 0, 'f', 3)
         .arg(sourcePath)
@@ -212,9 +224,9 @@ std::optional<QByteArray> ThumbnailService::extractSingleThumbnail(
         .arg(kThumbHeight)
         .arg(outFile);
 
-    const auto result = ffmpeg_->execute(cmd);
+    int sysRet = system(sysCmd.toLocal8Bit().constData());
 
-    if (result.success && file.exists() && file.size() > 0 && file.open(QIODevice::ReadOnly)) {
+    if (sysRet == 0 && file.exists() && file.size() > 0 && file.open(QIODevice::ReadOnly)) {
         const auto bytes = file.readAll();
         QMutexLocker lock(&cacheMutex_);
         cache_[singleKey] = {bytes};
@@ -231,23 +243,21 @@ std::optional<QByteArray> ThumbnailService::extractSingleFrameThrottled(
     if (file.exists() && file.size() > 0 && file.open(QIODevice::ReadOnly))
         return file.readAll();
 
-    const auto args = parseArgs(QStringLiteral(
-        R"(-nostdin -y %1-ss %2 -i "%3" -frames:v 1 -update 1 -s %4x%5 -q:v 6 "%6")")
+    // Use system() instead of QProcess to completely avoid Qt's internal
+    // QRingBuffer which overflows on H.265 MKV files.
+    QString cmd = QStringLiteral(
+        "ffmpeg -nostdin -y -loglevel quiet %1-ss %2 -i \"%3\" "
+        "-frames:v 1 -update 1 -s %4x%5 -q:v 6 \"%6\"")
         .arg(hwaccelArgs())
         .arg(seekSec, 0, 'f', 3)
         .arg(sourcePath)
         .arg(kThumbWidth)
         .arg(kThumbHeight)
-        .arg(outPath));
+        .arg(outPath);
 
-    QProcess process;
-    process.start(QStringLiteral("ffmpeg"), args);
-    if (!process.waitForFinished(15000)) {
-        process.kill();
-        return std::nullopt;
-    }
+    int ret = system(cmd.toLocal8Bit().constData());
 
-    if (process.exitCode() == 0) {
+    if (ret == 0) {
         QFile outFile(outPath);
         if (outFile.exists() && outFile.size() > 0 && outFile.open(QIODevice::ReadOnly))
             return outFile.readAll();

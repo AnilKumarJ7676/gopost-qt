@@ -19,6 +19,7 @@ import QtQuick.Layouts
 Item {
     id: root
 
+    readonly property real tabBarHeight: timelineNotifier && timelineNotifier.timelineTabCount > 1 ? 28 : 0
     readonly property real rulerHeight: 32
     readonly property real footerHeight: 28
     readonly property real headerWidth: 100
@@ -35,6 +36,29 @@ Item {
     property bool _showNewTrackAbove: false
     property bool _showNewTrackBelow: false
     property bool _anyClipDragging: false
+
+    // ---- Razor cut animation state ----
+    property real _razorCutX: 0
+    property real _razorCutTrackY: 0
+    property bool _razorCutVisible: false
+
+    // ---- JKL key state tracking for combo detection ----
+    property bool _jKeyHeld: false
+    property bool _kKeyHeld: false
+    property bool _lKeyHeld: false
+
+    Timer {
+        id: jkComboTimer
+        interval: 80; repeat: true
+        running: root._kKeyHeld && root._jKeyHeld && !root._lKeyHeld
+        onTriggered: { if (timelineNotifier) timelineNotifier.stepBackward() }
+    }
+    Timer {
+        id: klComboTimer
+        interval: 80; repeat: true
+        running: root._kKeyHeld && root._lKeyHeld && !root._jKeyHeld
+        onTriggered: { if (timelineNotifier) timelineNotifier.stepForward() }
+    }
 
     // ---- Global snap state ----
     property bool snapEnabled: true
@@ -56,6 +80,45 @@ Item {
     // ---- Feature 12: Split animation ----
     property real _splitLineX: -1
     property bool _splitLineVisible: false
+
+    // ---- Stacked timelines ----
+    property real stackedDividerRatio: 0.6
+    readonly property bool isStacked: timelineNotifier && timelineNotifier.stackedView
+    readonly property real secondaryPps: isStacked && timelineNotifier
+        ? timelineNotifier.secondaryPixelsPerSecond : 80
+    readonly property real secondaryTotalDur: isStacked && timelineNotifier
+        ? Math.max(timelineNotifier.secondaryTotalDuration + 10, 30) : 30
+    property bool _crossTimelineDragActive: false
+    property int _crossTimelineDragTrack: -1
+    property real _crossTimelineDragTime: 0
+
+    // ---- Auto-fit on import ----
+    property bool autoFitOnImport: true
+
+    // ---- Cut-point transition preview ----
+    property bool _cutPreviewVisible: false
+    property real _cutPreviewX: 0
+    property real _cutPreviewY: 0
+    property string _cutPreviewSourceA: ""
+    property string _cutPreviewSourceB: ""
+    property real _cutPreviewTimeA: 0
+    property real _cutPreviewTimeB: 0
+    property string _cutPreviewNameA: ""
+    property string _cutPreviewNameB: ""
+    property int _cutPreviewTransType: 0
+    property real _cutPreviewTransDur: 0
+
+    Timer {
+        id: cutPreviewTimer
+        interval: 500; repeat: false
+        onTriggered: root._cutPreviewVisible = true
+    }
+
+    // Reset position override when focus is lost
+    onActiveFocusChanged: {
+        if (!activeFocus && timelineNotifier && timelineNotifier.positionOverrideActive)
+            timelineNotifier.setPositionOverride(false)
+    }
 
     Component.onCompleted: console.log("[VE2Timeline] created, size:", width, "x", height)
 
@@ -82,9 +145,142 @@ Item {
     // ================================================================
     // Row 0: Ruler bar
     // ================================================================
+    // Timeline tab bar (only shown when multiple tabs exist)
+    // ================================================================
+    Rectangle {
+        id: tabBar
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: tabBarHeight
+        color: "#08081A"
+        visible: tabBarHeight > 0
+        z: 101
+
+        Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: "#1E1E38" }
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 4; anchors.rightMargin: 4
+            spacing: 1
+
+            // Breadcrumb path
+            Label {
+                text: timelineNotifier ? timelineNotifier.breadcrumbPath : "Project"
+                font.pixelSize: 9; color: "#6B6B88"
+                Layout.leftMargin: 4
+                visible: timelineNotifier && timelineNotifier.breadcrumbPath.indexOf(">") >= 0
+            }
+
+            Item { Layout.preferredWidth: 8; visible: timelineNotifier && timelineNotifier.breadcrumbPath.indexOf(">") >= 0 }
+
+            // Tab buttons
+            Repeater {
+                model: timelineNotifier ? timelineNotifier.timelineTabs : []
+                delegate: Rectangle {
+                    required property var modelData
+                    required property int index
+                    readonly property bool isActive: modelData.isActive
+                    Layout.preferredWidth: tabLbl.implicitWidth + 24 + (closeBtn.visible ? 16 : 0)
+                    Layout.preferredHeight: 22
+                    radius: 4
+                    color: isActive ? "#1E1E38" : (tabHov.hovered ? Qt.rgba(1,1,1,0.04) : "transparent")
+                    border.color: isActive ? "#6C63FF" : "transparent"
+                    border.width: isActive ? 1 : 0
+
+                    RowLayout {
+                        anchors.centerIn: parent; spacing: 2
+                        Label {
+                            id: tabLbl
+                            text: modelData.label || ("Tab " + (index + 1))
+                            font.pixelSize: 10; font.weight: isActive ? Font.Bold : Font.Normal
+                            color: isActive ? "#E0E0F0" : "#8888A0"
+                        }
+                        // Close button (not on last tab or if it's the only one)
+                        Label {
+                            id: closeBtn
+                            visible: timelineNotifier && timelineNotifier.timelineTabCount > 1
+                            text: "\u2715"; font.pixelSize: 8; color: "#6B6B88"
+                            MouseArea {
+                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                onClicked: { if (timelineNotifier) timelineNotifier.removeTimelineTab(index) }
+                            }
+                        }
+                    }
+                    MouseArea {
+                        anchors.fill: parent; z: -1; cursorShape: Qt.PointingHandCursor
+                        acceptedButtons: Qt.LeftButton
+                        onClicked: { if (timelineNotifier) timelineNotifier.switchTimelineTab(index) }
+                    }
+                    HoverHandler { id: tabHov }
+                }
+            }
+
+            // "+" button to add new tab
+            Rectangle {
+                Layout.preferredWidth: 22; Layout.preferredHeight: 22; radius: 4
+                color: addTabHov.hovered ? Qt.rgba(1,1,1,0.06) : "transparent"
+                Label {
+                    anchors.centerIn: parent; text: "+"; font.pixelSize: 14; color: "#6B6B88"
+                }
+                MouseArea {
+                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                    onClicked: { if (timelineNotifier) timelineNotifier.addTimelineTab() }
+                }
+                HoverHandler { id: addTabHov }
+                ToolTip.visible: addTabHov.hovered; ToolTip.text: "New timeline tab"
+            }
+
+            Item { Layout.fillWidth: true }
+
+            // Stacked view toggle
+            Rectangle {
+                Layout.preferredWidth: stackLbl.implicitWidth + 12; Layout.preferredHeight: 22; radius: 4
+                visible: timelineNotifier && timelineNotifier.timelineTabCount > 1
+                color: timelineNotifier && timelineNotifier.stackedView
+                    ? Qt.rgba(0.42, 0.39, 1.0, 0.15) : (stackHov.hovered ? Qt.rgba(1,1,1,0.04) : "transparent")
+                border.color: timelineNotifier && timelineNotifier.stackedView ? "#6C63FF" : "transparent"
+                Label {
+                    id: stackLbl; anchors.centerIn: parent
+                    text: "\u2261 Stacked"
+                    font.pixelSize: 9; font.weight: Font.DemiBold
+                    color: timelineNotifier && timelineNotifier.stackedView ? "#6C63FF" : "#6B6B88"
+                }
+                MouseArea {
+                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                    onClicked: { if (timelineNotifier) timelineNotifier.setStackedView(!timelineNotifier.stackedView) }
+                }
+                HoverHandler { id: stackHov }
+                ToolTip.visible: stackHov.hovered; ToolTip.text: "Toggle stacked timeline view"
+            }
+
+            // Back button for compound clips
+            Rectangle {
+                Layout.preferredWidth: backLbl.implicitWidth + 12; Layout.preferredHeight: 22; radius: 4
+                visible: timelineNotifier && timelineNotifier.timelineTabCount > 0
+                    && timelineNotifier.timelineTabs.length > 0
+                    && timelineNotifier.activeTimelineIndex >= 0
+                    && timelineNotifier.activeTimelineIndex < timelineNotifier.timelineTabs.length
+                    && timelineNotifier.timelineTabs[timelineNotifier.activeTimelineIndex].isCompound
+                color: backHov.hovered ? Qt.rgba(1,1,1,0.06) : "transparent"
+                Label {
+                    id: backLbl; anchors.centerIn: parent
+                    text: "\u2190 Back"
+                    font.pixelSize: 9; font.weight: Font.DemiBold; color: "#8888A0"
+                }
+                MouseArea {
+                    anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                    onClicked: { if (timelineNotifier) timelineNotifier.closeCompoundClip() }
+                }
+                HoverHandler { id: backHov }
+            }
+        }
+    }
+
+    // ================================================================
     Row {
         id: rulerRow
-        anchors.top: parent.top
+        anchors.top: tabBar.bottom
         anchors.left: parent.left
         anchors.right: parent.right
         height: rulerHeight
@@ -345,7 +541,7 @@ Item {
         anchors.top: rulerRow.bottom
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.bottom: footer.top
+        anchors.bottom: isStacked ? stackedDivider.top : footer.top
 
         // --- Fixed track headers ---
         Flickable {
@@ -372,15 +568,55 @@ Item {
                         readonly property bool trackVisible: tInfo.isVisible !== undefined ? tInfo.isVisible : true
                         readonly property bool trackLocked: tInfo.isLocked !== undefined ? tInfo.isLocked : false
                         readonly property bool trackMuted: tInfo.isMuted !== undefined ? tInfo.isMuted : false
+                        readonly property bool trackSoloed: tInfo.isSolo !== undefined ? tInfo.isSolo : false
                         readonly property string trackLabel: tInfo.label || ("Track " + (index + 1))
                         readonly property string trackColor: tInfo.color || ""
+                        readonly property double perTrackHeight: tInfo.trackHeight !== undefined ? tInfo.trackHeight : defaultTrackHeight
 
-                        height: trackVisible ? defaultTrackHeight : 12
-                        color: trackLocked ? "#0E0A1A" : "#10102A"
-                        border.color: "#1E1E38"
-                        border.width: 0.5
+                        height: trackVisible ? perTrackHeight : 12
+                        color: trackSoloed ? "#1A1608" : (trackLocked ? "#0E0A1A" : "#10102A")
+                        border.color: trackSoloed ? "#FFCA28" : "#1E1E38"
+                        border.width: trackSoloed ? 1 : 0.5
 
                         Behavior on height { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
+
+                        // Resize handle at bottom edge of header
+                        Rectangle {
+                            anchors.bottom: parent.bottom; anchors.left: parent.left; anchors.right: parent.right
+                            height: 4; z: 10
+                            color: resizeHandleMa.containsMouse || resizeHandleMa.pressed ? "#6C63FF" : "transparent"
+                            visible: trackVisible
+
+                            MouseArea {
+                                id: resizeHandleMa
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.SizeVerCursor
+                                property real startY: 0
+                                property real startHeight: 0
+
+                                onPressed: function(mouse) {
+                                    startY = mapToItem(null, 0, mouse.y).y
+                                    startHeight = perTrackHeight
+                                }
+                                onPositionChanged: function(mouse) {
+                                    if (pressed && timelineNotifier) {
+                                        var globalY = mapToItem(null, 0, mouse.y).y
+                                        var newHeight = Math.max(28, Math.min(200, startHeight + (globalY - startY)))
+                                        timelineNotifier.setTrackHeight(trackHeaderDelegate.index, newHeight)
+                                    }
+                                }
+                                onDoubleClicked: {
+                                    // Toggle between collapsed (28) and expanded (120)
+                                    if (timelineNotifier) {
+                                        var target = perTrackHeight <= 40 ? 120 : 28
+                                        timelineNotifier.setTrackHeight(trackHeaderDelegate.index, target)
+                                    }
+                                }
+                            }
+                            ToolTip.visible: resizeHandleMa.containsMouse && !resizeHandleMa.pressed
+                            ToolTip.text: "Drag to resize track, double-click to toggle"
+                        }
 
                         // Track color strip on left edge
                         Rectangle {
@@ -434,6 +670,15 @@ Item {
                                         return icons[Math.min(t, icons.length - 1)]
                                     }
                                     font.pixelSize: 11
+                                }
+
+                                // Magnetic primary indicator
+                                Label {
+                                    visible: tInfo.isMagneticPrimary === true
+                                        && timelineNotifier && timelineNotifier.magneticTimelineEnabled
+                                    text: "\u25C9"
+                                    font.pixelSize: 9
+                                    color: "#FF7043"
                                 }
 
                                 // Editable track name (Feature 15)
@@ -540,7 +785,7 @@ Item {
                                 // Solo button
                                 Rectangle {
                                     id: soloBtn
-                                    property bool isSoloed: tInfo.solo !== undefined ? tInfo.solo : false
+                                    property bool isSoloed: tInfo.isSolo !== undefined ? tInfo.isSolo : false
                                     width: 18; height: 18; radius: 3
                                     color: soloBtn.isSoloed ? Qt.rgba(1, 0.79, 0.16, 0.15) : "transparent"
                                     border.color: soloBtn.isSoloed ? "#FFCA28" : "#353550"
@@ -555,7 +800,7 @@ Item {
                                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor
                                         onClicked: { if (timelineNotifier) timelineNotifier.toggleTrackSolo(trackHeaderDelegate.index) }
                                     }
-                                    ToolTip.text: soloBtn.isSoloed ? "Unsolo track" : "Solo track"
+                                    ToolTip.text: soloBtn.isSoloed ? "Unsolo track (Alt+S)" : "Solo track (Alt+S)"
                                     ToolTip.visible: soloHov.hovered
                                     HoverHandler { id: soloHov }
                                 }
@@ -670,7 +915,8 @@ Item {
                         readonly property bool laneVisible: laneInfo.isVisible !== undefined ? laneInfo.isVisible : true
                         readonly property bool laneLocked: laneInfo.isLocked !== undefined ? laneInfo.isLocked : false
                         readonly property string laneColor: laneInfo.color || ""
-                        height: laneVisible ? defaultTrackHeight : 12
+                        readonly property double laneTrackHeight: laneInfo.trackHeight !== undefined ? laneInfo.trackHeight : defaultTrackHeight
+                        height: laneVisible ? laneTrackHeight : 12
 
                         Behavior on height { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
 
@@ -749,6 +995,68 @@ Item {
                             }
                         }
 
+                        // Gap overlays — highlight empty gaps between clips
+                        Repeater {
+                            id: gapRepeater
+                            model: {
+                                var g = timelineNotifier ? timelineNotifier.trackGeneration : 0
+                                if (!timelineNotifier || !laneVisible || trackLane.laneLocked) return []
+                                return timelineNotifier.detectGaps(trackLane.trackIdx)
+                            }
+                            delegate: Rectangle {
+                                readonly property var gapData: modelData || ({})
+                                readonly property double gapStart: gapData.start || 0
+                                readonly property double gapEnd: gapData.end || 0
+                                readonly property double gapDuration: gapData.duration || 0
+
+                                x: gapStart * pps
+                                width: Math.max(2, gapDuration * pps)
+                                y: 1; height: trackLane.height - 2
+                                z: 5
+                                color: Qt.rgba(0.6, 0.15, 0.15, 0.25)
+                                border.color: Qt.rgba(0.8, 0.2, 0.2, 0.4)
+                                border.width: 0.5
+                                radius: 2
+
+                                // Dashed center line
+                                Rectangle {
+                                    anchors.centerIn: parent
+                                    width: parent.width - 4; height: 1
+                                    color: Qt.rgba(0.8, 0.2, 0.2, 0.3)
+                                    visible: parent.width > 10
+                                }
+
+                                // Gap duration label
+                                Label {
+                                    anchors.centerIn: parent
+                                    visible: parent.width > 40
+                                    text: gapDuration.toFixed(1) + "s"
+                                    font.pixelSize: 9; font.weight: Font.DemiBold
+                                    color: "#CC4444"; opacity: 0.8
+                                }
+
+                                // Hover tooltip with gap duration
+                                ToolTip.visible: gapHov.hovered
+                                ToolTip.text: "Gap: " + gapDuration.toFixed(2) + "s"
+                                HoverHandler { id: gapHov }
+
+                                // Right-click for gap context menu
+                                MouseArea {
+                                    anchors.fill: parent
+                                    acceptedButtons: Qt.RightButton | Qt.LeftButton
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: function(mouse) {
+                                        if (mouse.button === Qt.RightButton) {
+                                            gapContextMenu._trackIdx = trackLane.trackIdx
+                                            gapContextMenu._gapStart = gapStart
+                                            gapContextMenu._gapDuration = gapDuration
+                                            gapContextMenu.popup()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Feature 15: Lock overlay — shows "not-allowed" cursor + reduced opacity
                         Rectangle {
                             anchors.fill: parent
@@ -772,57 +1080,130 @@ Item {
                             }
                         }
 
-                        // Per-track drop zone
+                        // Per-track drop zone with type-affinity validation
                         DropArea {
+                            id: trackDropArea
                             anchors.fill: parent
                             keys: ["application/x-gopost-media"]
 
+                            // Determine source type from drag payload for visual feedback
+                            function dragSourceType(drag) {
+                                if (drag.source && drag.source.assetData && drag.source.assetData.type === "media") {
+                                    var mt = drag.source.assetData.mediaType
+                                    if (mt === "image") return 1
+                                    if (mt === "audio") return 5
+                                    return 0  // video
+                                }
+                                return -1  // unknown
+                            }
+                            property int _hoveredSrcType: -1
+                            property bool _isCompatible: _hoveredSrcType >= 0 && timelineNotifier
+                                                          ? timelineNotifier.isTrackCompatible(trackLane.trackIdx, _hoveredSrcType)
+                                                          : true
+
+                            onEntered: drag => { _hoveredSrcType = dragSourceType(drag) }
+                            onExited: {
+                                _hoveredSrcType = -1
+                                root._insertIndicatorVisible = false
+                            }
+                            onPositionChanged: function(drag) {
+                                if (!timelineNotifier) return
+                                var timelineX = drag.x + trackFlick.contentX
+                                var dropTime = Math.max(0, timelineX / pps)
+                                var snapResult = internal.snapToNearest(dropTime, -1)
+                                if (snapResult) dropTime = snapResult.time
+                                root._insertIndicatorTime = dropTime
+                                root._insertIndicatorX = headerWidth + dropTime * pps - trackFlick.contentX
+                                root._insertIndicatorVisible = true
+                            }
+
+                            // Visual feedback: green highlight = compatible, red dim = incompatible
                             Rectangle {
                                 anchors.fill: parent
-                                color: parent.containsDrag ? Qt.rgba(0.424, 0.388, 1.0, 0.08) : "transparent"
-                                border.color: parent.containsDrag ? "#6C63FF" : "transparent"
-                                border.width: parent.containsDrag ? 1.5 : 0
+                                visible: trackDropArea.containsDrag
+                                color: trackDropArea._isCompatible
+                                    ? Qt.rgba(0.424, 0.388, 1.0, 0.08)
+                                    : Qt.rgba(0.94, 0.32, 0.31, 0.08)
+                                border.color: trackDropArea._isCompatible ? "#6C63FF" : "#EF5350"
+                                border.width: 1.5
                                 radius: 2
+                            }
+                            // Forbidden overlay for incompatible / locked tracks
+                            Label {
+                                anchors.centerIn: parent
+                                visible: trackDropArea.containsDrag && !trackDropArea._isCompatible
+                                text: trackLane.isLocked ? "\uD83D\uDD12 Locked" : "\u26D4 Incompatible"
+                                font.pixelSize: 11; font.weight: Font.Bold
+                                color: "#EF5350"; opacity: 0.7
                             }
 
                             onDropped: drop => {
+                                _hoveredSrcType = -1
                                 if (!timelineNotifier || !timelineNotifier.isReady) {
                                     console.warn("[VE2Timeline] track-drop rejected: timeline not ready")
                                     return
                                 }
-                                if (!drop.hasText) {
-                                    console.warn("[VE2Timeline] track-drop: no text data")
-                                    return
-                                }
 
+                                // Read data from drag source or MIME text
                                 var data
-                                try { data = JSON.parse(drop.text) } catch (e) {
-                                    console.warn("[VE2Timeline] track-drop: invalid JSON:", e)
-                                    return
+                                if (drop.source && drop.source.assetData && drop.source.assetData.type === "media") {
+                                    data = drop.source.assetData
+                                } else if (drop.hasText) {
+                                    try { data = JSON.parse(drop.text) } catch (e) {
+                                        console.warn("[VE2Timeline] track-drop: invalid JSON:", e)
+                                        return
+                                    }
                                 }
-                                if (data.type !== "media") return
+                                if (!data || data.type !== "media") return
 
-                                var sourceType = 0  // video
-                                if (data.mediaType === "image") sourceType = 1
-                                else if (data.mediaType === "audio") sourceType = 5
-
-                                var sourcePath = data.sourcePath || ""
-                                var displayName = data.displayName || "Untitled"
-                                var duration = (data.duration && data.duration > 0) ? data.duration : 5.0
-
-                                if (sourcePath === "") {
-                                    console.warn("[VE2Timeline] track-drop: empty sourcePath for", displayName)
-                                    return
+                                // Support multi-item drag: auto-route by media type
+                                var items = data.assets && data.assets.length > 0 ? data.assets : [data]
+                                // Batch size guardrail
+                                if (items.length > 50) {
+                                    if (mediaPoolNotifier) mediaPoolNotifier.validateBatchSize(items.length)
+                                    drop.accept(); return
                                 }
-
-                                console.log("[VE2Timeline] track-drop: track=", trackLane.trackIdx,
-                                            "type=", data.mediaType, "name=", displayName, "dur=", duration)
-                                var clipId = timelineNotifier.addClip(trackLane.trackIdx, sourceType, sourcePath, displayName, duration)
-                                if (clipId >= 0) {
-                                    timelineNotifier.selectClip(clipId)
-                                    console.log("[VE2Timeline] clip added: id=", clipId)
-                                } else {
-                                    console.warn("[VE2Timeline] track-drop: addClip failed for", displayName)
+                                root._insertIndicatorVisible = false
+                                var videoClips = [], audioClips = []
+                                for (var i = 0; i < items.length; ++i) {
+                                    var item = items[i]
+                                    var sourceType = 0
+                                    if (item.mediaType === "image") sourceType = 1
+                                    else if (item.mediaType === "audio") sourceType = 5
+                                    var sourcePath = item.sourcePath || ""
+                                    if (sourcePath === "") continue
+                                    var desc = {
+                                        sourceType: sourceType,
+                                        sourcePath: sourcePath,
+                                        displayName: item.displayName || "Untitled",
+                                        duration: (item.duration && item.duration > 0) ? item.duration : 5.0
+                                    }
+                                    if (sourceType === 5) audioClips.push(desc)
+                                    else videoClips.push(desc)
+                                }
+                                // Use a single addClipsBatch call — addClipsBatch already
+                                // auto-routes clips to compatible tracks, so we don't need
+                                // to split video/audio and call twice (which triggers two
+                                // full state mutations + two QML binding cascades).
+                                var allClips = videoClips.concat(audioClips)
+                                var allDroppedIds = []
+                                if (allClips.length > 0) {
+                                    // Pre-set zoom BEFORE addClipsBatch so that when
+                                    // tracksChanged fires, clips render at the fitted zoom
+                                    // instead of 100% zoom (which causes a 10-20s freeze).
+                                    var totalAddedDuration = 0
+                                    for (var j = 0; j < allClips.length; ++j)
+                                        totalAddedDuration += allClips[j].duration
+                                    internal.preComputeFitZoom(totalAddedDuration)
+                                    allDroppedIds = timelineNotifier.addClipsBatch(trackLane.trackIdx, allClips)
+                                }
+                                // Defer selection + scroll centering to next tick
+                                if (allDroppedIds.length > 0) {
+                                    var capturedIds = allDroppedIds.slice()
+                                    Qt.callLater(function() {
+                                        timelineNotifier.selectClip(capturedIds[capturedIds.length - 1])
+                                        internal.autoFitToClips(capturedIds)
+                                    })
                                 }
                                 drop.accept()
                             }
@@ -869,6 +1250,18 @@ Item {
                     event.accepted = true
                 }
             }
+
+            // Alt+Scroll: pan timeline horizontally
+            WheelHandler {
+                acceptedModifiers: Qt.AltModifier
+                onWheel: event => {
+                    var delta = event.angleDelta.y !== 0 ? event.angleDelta.y : event.angleDelta.x
+                    trackFlick.contentX = Math.max(0, Math.min(
+                        trackFlick.contentWidth - trackFlick.width,
+                        trackFlick.contentX - delta))
+                    event.accepted = true
+                }
+            }
         }
     }
 
@@ -878,7 +1271,7 @@ Item {
     Rectangle {
         visible: timelineNotifier ? timelineNotifier.hasInPoint : false
         anchors.top: rulerRow.top
-        anchors.bottom: footer.top
+        anchors.bottom: isStacked ? stackedDivider.top : footer.top
         x: headerWidth + (timelineNotifier ? timelineNotifier.inPoint * pps : 0) - trackFlick.contentX
         width: 2; z: 90; color: "#66BB6A"; opacity: 0.8
         Rectangle {
@@ -889,7 +1282,7 @@ Item {
     Rectangle {
         visible: timelineNotifier ? timelineNotifier.hasOutPoint : false
         anchors.top: rulerRow.top
-        anchors.bottom: footer.top
+        anchors.bottom: isStacked ? stackedDivider.top : footer.top
         x: headerWidth + (timelineNotifier ? timelineNotifier.outPoint * pps : 0) - trackFlick.contentX
         width: 2; z: 90; color: "#EF5350"; opacity: 0.8
         Rectangle {
@@ -901,7 +1294,7 @@ Item {
     Rectangle {
         visible: timelineNotifier ? (timelineNotifier.hasInPoint && timelineNotifier.hasOutPoint) : false
         anchors.top: rulerRow.bottom
-        anchors.bottom: footer.top
+        anchors.bottom: isStacked ? stackedDivider.top : footer.top
         x: headerWidth + (timelineNotifier ? timelineNotifier.inPoint * pps : 0) - trackFlick.contentX
         width: timelineNotifier ? (timelineNotifier.outPoint - timelineNotifier.inPoint) * pps : 0
         z: 80; color: Qt.rgba(0.424, 0.388, 1.0, 0.06)
@@ -920,7 +1313,7 @@ Item {
             readonly property string markerColor: modelData.color || "#4CAF50"
             visible: markerX > headerWidth - 5 && markerX < root.width + 5
             anchors.top: rulerRow.bottom
-            anchors.bottom: footer.top
+            anchors.bottom: isStacked ? stackedDivider.top : footer.top
             x: markerX
             width: 1; z: 85
             color: markerColor; opacity: 0.35
@@ -948,7 +1341,7 @@ Item {
         id: snapGuideLine
         visible: root._snapGuideVisible && root._snapGuideX >= 0
         anchors.top: rulerRow.top
-        anchors.bottom: footer.top
+        anchors.bottom: isStacked ? stackedDivider.top : footer.top
         x: root._snapGuideX
         width: 1; z: 95
         color: "#FFCA28"; opacity: 0.9
@@ -961,13 +1354,80 @@ Item {
     }
 
     // ================================================================
+    // Position override indicator (shown when P key is held)
+    // ================================================================
+    Rectangle {
+        visible: timelineNotifier && timelineNotifier.positionOverrideActive
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.topMargin: rulerHeight + 2
+        anchors.rightMargin: 4
+        width: 108; height: 20; radius: 4; z: 100
+        color: Qt.rgba(1, 0.44, 0.26, 0.2)
+        border.color: "#FF7043"
+        Label {
+            anchors.centerIn: parent
+            text: "P  Free Position"
+            font.pixelSize: 10; font.weight: Font.DemiBold
+            color: "#FF7043"
+        }
+    }
+
+    // ================================================================
+    // Razor mode indicator badge (top-right, red)
+    // ================================================================
+    Rectangle {
+        visible: timelineNotifier && timelineNotifier.razorModeEnabled
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.topMargin: rulerHeight + 24
+        anchors.rightMargin: 4
+        width: razorLbl.implicitWidth + 14; height: 20; radius: 4; z: 100
+        color: Qt.rgba(0.94, 0.33, 0.31, 0.2)
+        border.color: "#EF5350"
+        Label {
+            id: razorLbl; anchors.centerIn: parent
+            text: "\uD83D\uDD2A RAZOR (C)"
+            font.pixelSize: 10; font.weight: Font.DemiBold
+            color: "#EF5350"
+        }
+    }
+
+    // ================================================================
+    // Razor cut animation line (flashes red at cut point)
+    // ================================================================
+    Rectangle {
+        id: razorCutLine
+        visible: root._razorCutVisible
+        x: root._razorCutX + headerWidth - trackFlick.contentX
+        anchors.top: rulerRow.bottom
+        anchors.bottom: isStacked ? stackedDivider.top : footer.top
+        width: 2; z: 96
+        color: "#EF5350"
+        opacity: root._razorCutVisible ? 1.0 : 0.0
+
+        Behavior on opacity { NumberAnimation { duration: 300 } }
+
+        // Diamond indicator at top
+        Rectangle {
+            width: 8; height: 8; rotation: 45; x: -3; y: 2
+            color: "#EF5350"
+        }
+    }
+    Timer {
+        id: razorCutTimer
+        interval: 400; repeat: false
+        onTriggered: root._razorCutVisible = false
+    }
+
+    // ================================================================
     // Insertion indicator line (blue, for drag-to-reorder)
     // ================================================================
     Rectangle {
         id: insertIndicatorLine
         visible: root._insertIndicatorVisible && root._insertIndicatorX >= 0
         anchors.top: rulerRow.bottom
-        anchors.bottom: footer.top
+        anchors.bottom: isStacked ? stackedDivider.top : footer.top
         x: root._insertIndicatorX
         width: 3; z: 96; radius: 1.5
         color: "#448AFF"
@@ -992,7 +1452,7 @@ Item {
     Item {
         id: playheadItem
         anchors.top: parent.top
-        anchors.bottom: footer.top
+        anchors.bottom: isStacked ? stackedDivider.top : footer.top
         x: playheadMa.scrubbing
             ? headerWidth + playheadMa.scrubTime * pps - trackFlick.contentX
             : headerWidth + (timelineNotifier ? timelineNotifier.position * pps : 0) - trackFlick.contentX
@@ -1053,6 +1513,29 @@ Item {
             }
         }
 
+        // Shuttle speed indicator (shown near playhead when shuttling J/K/L)
+        Rectangle {
+            id: shuttleIndicator
+            visible: timelineNotifier && timelineNotifier.shuttleSpeedDisplay !== ""
+            width: shuttleSpeedLbl.implicitWidth + 12
+            height: 18; radius: 4; x: 10; y: rulerHeight + 4
+            color: {
+                if (!timelineNotifier) return Qt.rgba(0, 0, 0, 0.85)
+                var spd = timelineNotifier.shuttleSpeedDisplay
+                if (spd.indexOf("<") >= 0) return Qt.rgba(0.2, 0.4, 0.9, 0.85) // reverse = blue
+                return Qt.rgba(0.2, 0.7, 0.3, 0.85) // forward = green
+            }
+            border.color: "#FFFFFF"; border.width: 0.5
+
+            Label {
+                id: shuttleSpeedLbl
+                anchors.centerIn: parent
+                text: timelineNotifier ? timelineNotifier.shuttleSpeedDisplay : ""
+                font.pixelSize: 10; font.family: "monospace"; font.weight: Font.Bold
+                color: "#FFFFFF"
+            }
+        }
+
         // Drag handle — wide invisible grab area
         MouseArea {
             id: playheadMa
@@ -1088,7 +1571,372 @@ Item {
     }
 
     // ================================================================
-    // Row 2: Footer with zoom controls + scrollbar
+    // Cut-Point Transition Preview Popup
+    // ================================================================
+    Rectangle {
+        id: cutPreviewPopup
+        visible: root._cutPreviewVisible
+        z: 200
+        width: 280; height: 140
+        radius: 8
+        color: "#1A1A30"
+        border.color: "#3A3A5A"; border.width: 1
+
+        // Position above the cut point, clamped to root bounds
+        x: Math.max(4, Math.min(root.width - width - 4, root._cutPreviewX - width / 2))
+        y: Math.max(4, root._cutPreviewY - height - 16)
+
+        // Drop shadow
+        Rectangle {
+            anchors.fill: parent; anchors.margins: -2
+            radius: 10; color: "transparent"
+            border.color: Qt.rgba(0, 0, 0, 0.4); border.width: 3
+            z: -1
+        }
+
+        readonly property var transitionNames: [
+            "None", "Fade", "Dissolve", "Slide Left", "Slide Right", "Slide Up", "Slide Down",
+            "Wipe Left", "Wipe Right", "Wipe Up", "Wipe Down", "Zoom", "Push", "Reveal",
+            "Iris", "Clock Wipe", "Blur", "Glitch", "Morph", "Flash", "Spin"
+        ]
+
+        Column {
+            anchors.fill: parent; anchors.margins: 6; spacing: 4
+
+            // Clip name headers
+            Row {
+                width: parent.width; spacing: 4
+                Label {
+                    width: (parent.width - 4) / 2
+                    text: root._cutPreviewNameA
+                    font.pixelSize: 9; font.weight: Font.DemiBold; color: "#A0A0C0"
+                    elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter
+                }
+                Label {
+                    width: (parent.width - 4) / 2
+                    text: root._cutPreviewNameB
+                    font.pixelSize: 9; font.weight: Font.DemiBold; color: "#A0A0C0"
+                    elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter
+                }
+            }
+
+            // Side-by-side thumbnails
+            Row {
+                width: parent.width; spacing: 4; height: 76
+
+                Rectangle {
+                    width: (parent.width - 4) / 2; height: 76; radius: 4
+                    color: "#0D0D1A"; clip: true
+                    Image {
+                        anchors.fill: parent; fillMode: Image.PreserveAspectCrop
+                        source: root._cutPreviewSourceA !== ""
+                            ? "image://videothumbnail/" + Qt.btoa(root._cutPreviewSourceA)
+                              + "@" + root._cutPreviewTimeA.toFixed(1) + "@68"
+                            : ""
+                        asynchronous: true
+                    }
+                    // "A" badge
+                    Rectangle {
+                        anchors.left: parent.left; anchors.top: parent.top
+                        anchors.margins: 3; width: 16; height: 16; radius: 8
+                        color: Qt.rgba(0, 0, 0, 0.6)
+                        Label { anchors.centerIn: parent; text: "A"; font.pixelSize: 9; font.weight: Font.Bold; color: "#E0E0F0" }
+                    }
+                }
+
+                Rectangle {
+                    width: (parent.width - 4) / 2; height: 76; radius: 4
+                    color: "#0D0D1A"; clip: true
+                    Image {
+                        anchors.fill: parent; fillMode: Image.PreserveAspectCrop
+                        source: root._cutPreviewSourceB !== ""
+                            ? "image://videothumbnail/" + Qt.btoa(root._cutPreviewSourceB)
+                              + "@" + root._cutPreviewTimeB.toFixed(1) + "@68"
+                            : ""
+                        asynchronous: true
+                    }
+                    // "B" badge
+                    Rectangle {
+                        anchors.right: parent.right; anchors.top: parent.top
+                        anchors.margins: 3; width: 16; height: 16; radius: 8
+                        color: Qt.rgba(0, 0, 0, 0.6)
+                        Label { anchors.centerIn: parent; text: "B"; font.pixelSize: 9; font.weight: Font.Bold; color: "#E0E0F0" }
+                    }
+                }
+            }
+
+            // Transition info bar
+            Rectangle {
+                width: parent.width; height: 22; radius: 4
+                color: root._cutPreviewTransType > 0 ? Qt.rgba(0.15, 0.78, 0.85, 0.12) : Qt.rgba(1, 1, 1, 0.04)
+                border.color: root._cutPreviewTransType > 0 ? "#26C6DA" : "#2A2A50"
+                border.width: 1
+
+                Label {
+                    anchors.centerIn: parent
+                    text: {
+                        if (root._cutPreviewTransType > 0) {
+                            var name = cutPreviewPopup.transitionNames[Math.min(root._cutPreviewTransType,
+                                cutPreviewPopup.transitionNames.length - 1)]
+                            return "\u2194 " + name + " " + root._cutPreviewTransDur.toFixed(1) + "s"
+                        }
+                        return "\u2702 Hard Cut"
+                    }
+                    font.pixelSize: 10; font.weight: Font.DemiBold
+                    color: root._cutPreviewTransType > 0 ? "#26C6DA" : "#8888A0"
+                }
+            }
+        }
+    }
+
+    // ================================================================
+    // Stacked View: Divider + Secondary Mini-Timeline
+    // ================================================================
+    Rectangle {
+        id: stackedDivider
+        visible: isStacked
+        anchors.left: parent.left; anchors.right: parent.right
+        y: tabBarHeight + rulerHeight + (root.height - tabBarHeight - rulerHeight - footerHeight) * stackedDividerRatio
+        height: 6; color: dividerMa.containsMouse || dividerMa.pressed ? "#6C63FF" : "#1E1E38"
+        z: 102
+
+        Rectangle { anchors.top: parent.top; width: parent.width; height: 1; color: "#2A2A50" }
+        Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: "#2A2A50" }
+
+        MouseArea {
+            id: dividerMa
+            anchors.fill: parent; anchors.margins: -3
+            hoverEnabled: true; cursorShape: Qt.SplitVCursor
+            property real pressY: 0
+            property real pressRatio: 0
+            onPressed: function(mouse) { pressY = mapToItem(root, 0, mouse.y).y; pressRatio = stackedDividerRatio }
+            onPositionChanged: function(mouse) {
+                if (!pressed) return
+                var globalY = mapToItem(root, 0, mouse.y).y
+                var dy = globalY - pressY
+                var available = root.height - tabBarHeight - rulerHeight - footerHeight
+                if (available > 0)
+                    stackedDividerRatio = Math.max(0.25, Math.min(0.75, pressRatio + dy / available))
+            }
+        }
+    }
+
+    Item {
+        id: secondarySection
+        visible: isStacked
+        anchors.top: stackedDivider.bottom
+        anchors.left: parent.left; anchors.right: parent.right
+        anchors.bottom: footer.top
+        clip: true
+
+        readonly property real secHeaderH: 24
+        readonly property real secRulerH: 20
+        readonly property real secTrackH: 48
+        readonly property real secLabelW: 60
+
+        // Header bar
+        Rectangle {
+            id: secHeader
+            anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
+            height: secondarySection.secHeaderH; color: "#0D0D20"
+            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 1; color: "#1E1E38" }
+
+            RowLayout {
+                anchors.fill: parent; anchors.leftMargin: 8; anchors.rightMargin: 8; spacing: 6
+
+                Label {
+                    text: timelineNotifier ? timelineNotifier.secondaryTabLabel : ""
+                    font.pixelSize: 10; font.weight: Font.DemiBold; color: "#A0A0C0"
+                    elide: Text.ElideRight; Layout.fillWidth: true
+                }
+
+                // Swap button
+                Rectangle {
+                    Layout.preferredWidth: swapLbl.implicitWidth + 12; Layout.preferredHeight: 18; radius: 3
+                    color: swapHov.hovered ? Qt.rgba(1,1,1,0.08) : "transparent"
+                    border.color: "#3A3A5A"; border.width: 1
+                    Label {
+                        id: swapLbl; anchors.centerIn: parent
+                        text: "\u21C5 Swap"; font.pixelSize: 9; color: "#8888A0"
+                    }
+                    MouseArea {
+                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: { if (timelineNotifier) timelineNotifier.swapActiveAndSecondary() }
+                    }
+                    HoverHandler { id: swapHov }
+                    ToolTip.visible: swapHov.hovered; ToolTip.text: "Swap active and secondary timelines"
+                }
+            }
+        }
+
+        // Mini ruler
+        Canvas {
+            id: secRuler
+            anchors.top: secHeader.bottom; anchors.left: parent.left; anchors.right: parent.right
+            height: secondarySection.secRulerH
+            readonly property real scrollX: secFlick.contentX
+
+            onPaint: {
+                var ctx = getContext("2d")
+                ctx.clearRect(0, 0, width, height)
+                ctx.fillStyle = "#08081A"
+                ctx.fillRect(0, 0, width, height)
+
+                var sPps = secondaryPps
+                if (sPps <= 0) return
+
+                // Determine tick spacing
+                var minPx = 60
+                var rawInterval = minPx / sPps
+                var intervals = [0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600]
+                var interval = intervals[intervals.length - 1]
+                for (var k = 0; k < intervals.length; k++) {
+                    if (intervals[k] * sPps >= minPx) { interval = intervals[k]; break }
+                }
+
+                var startTime = Math.floor(scrollX / sPps / interval) * interval
+                var endTime = (scrollX + width) / sPps + interval
+
+                ctx.strokeStyle = "#2A2A50"
+                ctx.fillStyle = "#6B6B88"
+                ctx.font = "9px monospace"
+                ctx.lineWidth = 1
+
+                for (var t = startTime; t <= endTime; t += interval) {
+                    var x = secondarySection.secLabelW + t * sPps - scrollX
+                    if (x < secondarySection.secLabelW - 5 || x > width + 5) continue
+                    ctx.beginPath()
+                    ctx.moveTo(x, height - 8)
+                    ctx.lineTo(x, height)
+                    ctx.stroke()
+
+                    var mins = Math.floor(t / 60)
+                    var secs = Math.floor(t % 60)
+                    var label = mins + ":" + (secs < 10 ? "0" : "") + secs
+                    ctx.fillText(label, x + 3, height - 2)
+                }
+            }
+
+            onScrollXChanged: requestPaint()
+            onWidthChanged: requestPaint()
+            Connections {
+                target: root
+                function onSecondaryPpsChanged() { secRuler.requestPaint() }
+            }
+        }
+
+        // Track lanes
+        Flickable {
+            id: secFlick
+            anchors.top: secRuler.bottom; anchors.bottom: parent.bottom
+            anchors.left: parent.left; anchors.right: parent.right
+            contentWidth: Math.max(width, secondaryTotalDur * secondaryPps + secondarySection.secLabelW)
+            contentHeight: secTrackCol.height
+            clip: true
+            flickableDirection: Flickable.HorizontalFlick
+            boundsBehavior: Flickable.StopAtBounds
+
+            Column {
+                id: secTrackCol
+
+                Repeater {
+                    model: isStacked && timelineNotifier ? timelineNotifier.secondaryTracks : []
+                    delegate: Item {
+                        required property var modelData
+                        required property int index
+                        width: secFlick.contentWidth
+                        height: secondarySection.secTrackH
+
+                        // Track label
+                        Rectangle {
+                            id: secTrackLabel
+                            width: secondarySection.secLabelW; height: parent.height
+                            color: index % 2 === 0 ? "#0D0D1A" : "#0F0F1E"
+                            border.color: "#1E1E38"; border.width: 0
+                            z: 2
+
+                            Label {
+                                anchors.centerIn: parent
+                                text: modelData.label || ("Track " + (index + 1))
+                                font.pixelSize: 9; color: "#6B6B88"
+                                elide: Text.ElideRight; width: parent.width - 8
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+                            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 0.5; color: "#1E1E38" }
+                        }
+
+                        // Track background
+                        Rectangle {
+                            anchors.left: secTrackLabel.right; anchors.right: parent.right
+                            height: parent.height
+                            color: index % 2 === 0 ? Qt.rgba(0.04, 0.04, 0.08, 1) : Qt.rgba(0.05, 0.05, 0.10, 1)
+                            Rectangle { anchors.bottom: parent.bottom; width: parent.width; height: 0.5; color: "#1E1E38" }
+
+                            // Clips
+                            Repeater {
+                                model: modelData.clips || []
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    x: modelData.timelineIn * secondaryPps
+                                    width: Math.max(4, modelData.duration * secondaryPps)
+                                    y: 3; height: secondarySection.secTrackH - 6
+                                    radius: 3
+
+                                    readonly property int sType: modelData.sourceType || 0
+                                    readonly property color typeColor: {
+                                        var colors = ["#4A90D9", "#43A047", "#FFCA28", "#E040FB", "#FF7043", "#43A047"]
+                                        return colors[Math.min(sType, colors.length - 1)]
+                                    }
+
+                                    color: Qt.rgba(typeColor.r, typeColor.g, typeColor.b, 0.35)
+                                    border.color: Qt.rgba(typeColor.r, typeColor.g, typeColor.b, 0.7)
+                                    border.width: 1
+
+                                    Label {
+                                        anchors.centerIn: parent; width: parent.width - 6
+                                        text: parent.parent.modelData ? (parent.modelData.displayName || "") : ""
+                                        font.pixelSize: 8; color: "#C0C0D0"
+                                        elide: Text.ElideRight
+                                        horizontalAlignment: Text.AlignHCenter
+                                        visible: parent.width > 30
+                                    }
+                                }
+                            }
+                        }
+
+                        // Click to swap
+                        MouseArea {
+                            anchors.fill: parent; z: 1
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: { if (timelineNotifier) timelineNotifier.swapActiveAndSecondary() }
+                        }
+                    }
+                }
+            }
+
+            // Secondary playhead
+            Rectangle {
+                x: secondarySection.secLabelW + (timelineNotifier ? timelineNotifier.secondaryPosition : 0) * secondaryPps - secFlick.contentX
+                width: 1; height: secFlick.contentHeight
+                color: "#6C63FF"; z: 10
+                visible: isStacked
+            }
+        }
+
+        // Cross-timeline drag ghost
+        Rectangle {
+            visible: root._crossTimelineDragActive
+            x: secondarySection.secLabelW + root._crossTimelineDragTime * secondaryPps - secFlick.contentX
+            y: secondarySection.secHeaderH + secondarySection.secRulerH + root._crossTimelineDragTrack * secondarySection.secTrackH + 3
+            width: 80; height: secondarySection.secTrackH - 6
+            radius: 3; z: 20
+            color: Qt.rgba(0.42, 0.39, 1.0, 0.3); border.color: "#6C63FF"; border.width: 2
+            Label { anchors.centerIn: parent; text: "Drop here"; font.pixelSize: 9; color: "#E0E0F0" }
+        }
+    }
+
+    // ================================================================
+    // Row 2: Footer with scrollbar
     // ================================================================
     Rectangle {
         id: footer
@@ -1103,138 +1951,6 @@ Item {
             anchors.fill: parent
             anchors.leftMargin: 6; anchors.rightMargin: 6
             spacing: 4
-
-            // Zoom controls — logarithmic slider for extreme range (0.01–400 pps)
-            ToolButton {
-                width: 24; height: 24
-                contentItem: Label { text: "\u2796"; font.pixelSize: 12; color: "#8888A0"; anchors.centerIn: parent }
-                onClicked: {
-                    if (timelineNotifier) {
-                        var anchorX = trackFlick.width / 2
-                        timelineNotifier.zoomAtPosition(0.5, anchorX + trackFlick.contentX)
-                    }
-                }
-                ToolTip.text: "Zoom out (0.5x)"; ToolTip.visible: hovered
-            }
-
-            Slider {
-                id: zoomSlider
-                Layout.preferredWidth: 100
-                from: 0; to: 1   // normalized [0..1] → log scale
-
-                // Log scale constants
-                readonly property real logMin: Math.log(0.01)    // ln(0.01)
-                readonly property real logMax: Math.log(400)     // ln(400)
-                readonly property real logRange: logMax - logMin
-
-                // Convert pps → slider [0..1]
-                function ppsToSlider(p) {
-                    return (Math.log(Math.max(0.01, p)) - logMin) / logRange
-                }
-                // Convert slider [0..1] → pps
-                function sliderToPps(s) {
-                    return Math.exp(logMin + s * logRange)
-                }
-
-                onMoved: {
-                    if (timelineNotifier) {
-                        var newPps = sliderToPps(value)
-                        var anchorX = trackFlick.width / 2
-                        timelineNotifier.zoomAtPosition(newPps / pps, anchorX + trackFlick.contentX)
-                    }
-                }
-
-                // Sync slider position from pps (log scale)
-                Binding on value { value: zoomSlider.ppsToSlider(pps); when: !zoomSlider.pressed }
-
-                background: Rectangle {
-                    x: zoomSlider.leftPadding; y: zoomSlider.topPadding + zoomSlider.availableHeight / 2 - 1
-                    width: zoomSlider.availableWidth; height: 2; radius: 1; color: "#1A1A34"
-                    Rectangle { width: zoomSlider.visualPosition * parent.width; height: parent.height; radius: 1; color: "#6C63FF" }
-                }
-            }
-
-            ToolButton {
-                width: 24; height: 24
-                contentItem: Label { text: "\u2795"; font.pixelSize: 12; color: "#8888A0"; anchors.centerIn: parent }
-                onClicked: {
-                    if (timelineNotifier) {
-                        var anchorX = trackFlick.width / 2
-                        timelineNotifier.zoomAtPosition(2.0, anchorX + trackFlick.contentX)
-                    }
-                }
-                ToolTip.text: "Zoom in (2x)"; ToolTip.visible: hovered
-            }
-
-            // Feature 11: Zoom percentage label
-            Label {
-                text: timelineNotifier ? Math.round(timelineNotifier.zoomPercentage) + "%" : "100%"
-                font.pixelSize: 10; font.family: "monospace"
-                color: "#7070A0"
-                Layout.preferredWidth: 36
-                horizontalAlignment: Text.AlignHCenter
-            }
-
-            // Zoom to fit all clips
-            ToolButton {
-                width: 24; height: 24
-                contentItem: Label { text: "\u2922"; font.pixelSize: 14; color: "#8888A0"; anchors.centerIn: parent }
-                onClicked: {
-                    if (!timelineNotifier) return
-                    var totalDur = timelineNotifier.totalDuration
-                    if (totalDur <= 0) return
-                    var visibleWidth = trackFlick.width > 100 ? trackFlick.width * 0.95 : 600
-                    var fitPps = visibleWidth / totalDur
-                    fitPps = Math.max(0.01, Math.min(400, fitPps))
-                    timelineNotifier.setPixelsPerSecond(fitPps)
-                    timelineNotifier.setScrollOffset(0)
-                }
-                ToolTip.text: "Zoom to fit all clips"; ToolTip.visible: hovered
-            }
-
-            Rectangle { width: 1; height: 16; color: "#252540" }
-
-            // Snap toggle (magnet icon)
-            ToolButton {
-                width: 26; height: 24
-                contentItem: Label {
-                    text: "\uD83E\uDDF2"  // magnet emoji
-                    font.pixelSize: 13
-                    color: root.snapEnabled ? "#FFCA28" : "#505068"
-                    anchors.centerIn: parent
-                }
-                onClicked: root.snapEnabled = !root.snapEnabled
-                ToolTip.text: root.snapEnabled ? "Snapping ON (click to disable)" : "Snapping OFF (click to enable)"
-                ToolTip.visible: hovered
-                background: Rectangle {
-                    radius: 4
-                    color: root.snapEnabled ? Qt.rgba(1, 0.79, 0.16, 0.1) : "transparent"
-                    border.color: root.snapEnabled ? "#FFCA28" : "transparent"
-                    border.width: root.snapEnabled ? 1 : 0
-                }
-            }
-
-            // Color legend toggle
-            ToolButton {
-                width: 26; height: 24
-                contentItem: Label {
-                    text: "\uD83C\uDFA8"  // palette emoji
-                    font.pixelSize: 13
-                    color: colorLegendPanel.visible ? "#6C63FF" : "#505068"
-                    anchors.centerIn: parent
-                }
-                onClicked: colorLegendPanel.visible = !colorLegendPanel.visible
-                ToolTip.text: "Color legend"
-                ToolTip.visible: hovered
-                background: Rectangle {
-                    radius: 4
-                    color: colorLegendPanel.visible ? Qt.rgba(0.42, 0.39, 1.0, 0.1) : "transparent"
-                    border.color: colorLegendPanel.visible ? "#6C63FF" : "transparent"
-                    border.width: colorLegendPanel.visible ? 1 : 0
-                }
-            }
-
-            Rectangle { width: 1; height: 16; color: "#252540" }
 
             // Scrollbar
             ScrollBar {
@@ -1263,57 +1979,84 @@ Item {
     // Fallback drop area (full panel, z:-1)
     // ================================================================
     DropArea {
+        id: fallbackDropArea
         anchors.top: rulerRow.bottom
         anchors.left: parent.left; anchors.leftMargin: headerWidth
         anchors.right: parent.right
-        anchors.bottom: footer.top
+        anchors.bottom: isStacked ? stackedDivider.top : footer.top
         z: -1
         keys: ["application/x-gopost-media"]
+
+        Rectangle {
+            anchors.fill: parent
+            color: parent.containsDrag ? Qt.rgba(0.424, 0.388, 1.0, 0.06) : "transparent"
+            border.color: parent.containsDrag ? "#6C63FF" : "transparent"
+            border.width: parent.containsDrag ? 1.5 : 0
+            radius: 4
+        }
 
         onDropped: drop => {
             if (!timelineNotifier || !timelineNotifier.isReady) {
                 console.warn("[VE2Timeline] fallback-drop rejected: timeline not ready")
                 return
             }
-            if (!drop.hasText) {
-                console.warn("[VE2Timeline] fallback-drop: no text data")
-                return
-            }
 
+            // Read data from drag source or MIME text
             var data
-            try { data = JSON.parse(drop.text) } catch (e) {
-                console.warn("[VE2Timeline] fallback-drop: invalid JSON:", e)
-                return
+            if (drop.source && drop.source.assetData && drop.source.assetData.type === "media") {
+                data = drop.source.assetData
+            } else if (drop.hasText) {
+                try { data = JSON.parse(drop.text) } catch (e) {
+                    console.warn("[VE2Timeline] fallback-drop: invalid JSON:", e)
+                    return
+                }
             }
-            if (data.type !== "media") return
+            if (!data || data.type !== "media") return
 
-            // Map media type to source type and target track
-            var sourceType = 0  // video
-            var trackIndex = 1  // video track
-            if (data.mediaType === "image") {
-                sourceType = 1
-            } else if (data.mediaType === "audio") {
-                sourceType = 5
-                trackIndex = 2  // audio track
+            // Support multi-item drag: batch insert
+            var items = data.assets && data.assets.length > 0 ? data.assets : [data]
+            // Batch size guardrail
+            if (items.length > 50) {
+                if (mediaPoolNotifier) mediaPoolNotifier.validateBatchSize(items.length)
+                drop.accept(); return
             }
-
-            var sourcePath = data.sourcePath || ""
-            var displayName = data.displayName || "Untitled"
-            var duration = (data.duration && data.duration > 0) ? data.duration : 5.0
-
-            if (sourcePath === "") {
-                console.warn("[VE2Timeline] fallback-drop: empty sourcePath for", displayName)
-                return
+            // Group by compatible track for batch insert
+            var videoClips = [], audioClips = []
+            for (var i = 0; i < items.length; ++i) {
+                var item = items[i]
+                var sourceType = 0
+                if (item.mediaType === "image") sourceType = 1
+                else if (item.mediaType === "audio") sourceType = 5
+                var sourcePath = item.sourcePath || ""
+                if (sourcePath === "") continue
+                var desc = {
+                    sourceType: sourceType,
+                    sourcePath: sourcePath,
+                    displayName: item.displayName || "Untitled",
+                    duration: (item.duration && item.duration > 0) ? item.duration : 5.0
+                }
+                if (sourceType === 5) audioClips.push(desc)
+                else videoClips.push(desc)
             }
-
-            console.log("[VE2Timeline] fallback-drop: track=", trackIndex,
-                        "type=", data.mediaType, "name=", displayName, "dur=", duration)
-            var clipId = timelineNotifier.addClip(trackIndex, sourceType, sourcePath, displayName, duration)
-            if (clipId >= 0) {
-                timelineNotifier.selectClip(clipId)
-                console.log("[VE2Timeline] clip added: id=", clipId)
-            } else {
-                console.warn("[VE2Timeline] fallback-drop: addClip failed for", displayName)
+            // Single batch call — addClipsBatch auto-routes by type
+            var allClips = videoClips.concat(audioClips)
+            var allDroppedIds = []
+            if (allClips.length > 0) {
+                // Pre-set zoom BEFORE addClipsBatch so clips render at fitted zoom
+                var totalAddedDuration = 0
+                for (var j = 0; j < allClips.length; ++j)
+                    totalAddedDuration += allClips[j].duration
+                internal.preComputeFitZoom(totalAddedDuration)
+                var defaultTrack = timelineNotifier.findCompatibleTrack(0, 0)
+                allDroppedIds = timelineNotifier.addClipsBatch(defaultTrack, allClips)
+            }
+            // Defer selection + scroll centering to next tick
+            if (allDroppedIds.length > 0) {
+                var capturedIds = allDroppedIds.slice()
+                Qt.callLater(function() {
+                    timelineNotifier.selectClip(capturedIds[capturedIds.length - 1])
+                    internal.autoFitToClips(capturedIds)
+                })
             }
             drop.accept()
         }
@@ -1364,17 +2107,38 @@ Item {
         readonly property string sourcePath: clipInfo.sourcePath || ""
         readonly property string colorTag: clipInfo.colorTag || ""
         readonly property string customLabel: clipInfo.customLabel || ""
+        readonly property bool isFreezeFrame: clipInfo.isFreezeFrame !== undefined ? clipInfo.isFreezeFrame : false
+        readonly property bool hasEffects: clipInfo.hasEffects !== undefined ? clipInfo.hasEffects : false
+        readonly property int effectCount: clipInfo.effectCount !== undefined ? clipInfo.effectCount : 0
+        readonly property bool hasColorGrading: clipInfo.hasColorGrading !== undefined ? clipInfo.hasColorGrading : false
+        readonly property bool hasTransition: clipInfo.hasTransition !== undefined ? clipInfo.hasTransition : false
+        readonly property int transitionInType: clipInfo.transitionInType !== undefined ? clipInfo.transitionInType : 0
+        readonly property double transitionInDur: clipInfo.transitionInDur !== undefined ? clipInfo.transitionInDur : 0
+        readonly property int transitionOutType: clipInfo.transitionOutType !== undefined ? clipInfo.transitionOutType : 0
+        readonly property double transitionOutDur: clipInfo.transitionOutDur !== undefined ? clipInfo.transitionOutDur : 0
+        readonly property int connectedToPrimaryClipId: clipInfo.connectedToPrimaryClipId !== undefined ? clipInfo.connectedToPrimaryClipId : -1
+        readonly property bool isConnectedClip: connectedToPrimaryClipId >= 0
+        readonly property real sourceDuration: clipInfo.sourceDuration !== undefined ? clipInfo.sourceDuration : 0
+        readonly property real sourceIn: clipInfo.sourceIn !== undefined ? clipInfo.sourceIn : 0
+        readonly property real sourceOut: clipInfo.sourceOut !== undefined ? clipInfo.sourceOut : 0
+        readonly property bool isDisabled: clipInfo.isDisabled !== undefined ? clipInfo.isDisabled : false
 
         x: timelineIn * pps
         width: Math.max(4, duration * pps)
 
         // Smooth animation for ripple shifts (200ms ease-out)
+        // Disabled during drag, trim, AND zoom changes to keep thumbnails in sync
+        property real _lastPps: pps
+        property bool _ppsChanging: false
+        on_LastPpsChanged: { _ppsChanging = true; _ppsResetTimer.restart() }
+        Timer { id: _ppsResetTimer; interval: 50; onTriggered: clipRoot._ppsChanging = false }
+
         Behavior on x {
-            enabled: !clipBodyMa.dragActive && !trimLeftMa.pressed && !trimRightMa.pressed
+            enabled: !clipBodyMa.dragActive && !trimLeftMa.pressed && !trimRightMa.pressed && !clipRoot._ppsChanging
             NumberAnimation { duration: 200; easing.type: Easing.OutQuad }
         }
         Behavior on width {
-            enabled: !clipBodyMa.dragActive && !trimLeftMa.pressed && !trimRightMa.pressed
+            enabled: !clipBodyMa.dragActive && !trimLeftMa.pressed && !trimRightMa.pressed && !clipRoot._ppsChanging
             NumberAnimation { duration: 200; easing.type: Easing.OutQuad }
         }
 
@@ -1399,6 +2163,19 @@ Item {
         // Encoded path for thumbnail provider
         readonly property string pathB64: sourcePath !== "" ? Qt.btoa(sourcePath) : ""
 
+        // ---- Staggered thumbnail readiness ----
+        // Delay thumbnail loading after clip creation to avoid 100+ simultaneous
+        // ffmpeg spawns when a batch of clips is added at once.
+        // Stagger by clipIndex so clips appear progressively.
+        property bool _thumbReady: false
+        Timer {
+            id: _thumbDelayTimer
+            interval: 80 + clipRoot.clipIndex * 60  // 80ms base + 60ms per clip
+            repeat: false
+            running: true
+            onTriggered: clipRoot._thumbReady = true
+        }
+
         // ---- Viewport-aware thumbnail calculation ----
         // Only create thumbnails for the visible portion of the clip (virtual scrolling).
         // Quantized to grid cells to avoid recreating items on every scroll pixel.
@@ -1417,7 +2194,8 @@ Item {
         readonly property real clipVisWidth: Math.max(0, clipVisRight - clipVisLeft)
 
         // Number of thumbnails to fill the quantized visible range (capped at 30 for performance)
-        readonly property int thumbCount: _isVisible && (sourceType === 0 || sourceType === 1) && pathB64 !== "" && clipVisWidth > 0
+        // Gate on _thumbReady to stagger ffmpeg spawns across multiple event loop ticks
+        readonly property int thumbCount: _thumbReady && _isVisible && (sourceType === 0 || sourceType === 1) && pathB64 !== "" && clipVisWidth > 0
                                            ? Math.min(30, Math.max(1, Math.round(clipVisWidth / thumbCellWidth)))
                                            : 0
         // Time range mapped from quantized pixel range, clamped to [0, duration]
@@ -1451,6 +2229,56 @@ Item {
                 : 0
             readonly property real thumbAreaHeight: parent.height - waveBarHeight
 
+            // ---- Shimmer loading placeholder (visible while thumbnails are loading) ----
+            Rectangle {
+                id: shimmerPlaceholder
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                height: clipBody.thumbAreaHeight
+                radius: 2
+                visible: (sourceType === 0 || sourceType === 1) && !_thumbReady
+                color: Qt.rgba(clipColor.r, clipColor.g, clipColor.b, 0.10)
+                clip: true
+
+                // Animated shimmer gradient sweeping left to right
+                Rectangle {
+                    id: shimmerBar
+                    width: parent.width * 0.4
+                    height: parent.height
+                    radius: 2
+                    opacity: 0.4
+                    gradient: Gradient {
+                        orientation: Gradient.Horizontal
+                        GradientStop { position: 0.0; color: "transparent" }
+                        GradientStop { position: 0.5; color: Qt.rgba(clipColor.r, clipColor.g, clipColor.b, 0.25) }
+                        GradientStop { position: 1.0; color: "transparent" }
+                    }
+                    SequentialAnimation on x {
+                        loops: Animation.Infinite
+                        running: shimmerPlaceholder.visible
+                        NumberAnimation {
+                            from: -shimmerBar.width
+                            to: shimmerPlaceholder.width
+                            duration: 1200
+                            easing.type: Easing.InOutQuad
+                        }
+                        PauseAnimation { duration: 200 }
+                    }
+                }
+
+                // Clip name overlay on shimmer
+                Label {
+                    anchors.centerIn: parent
+                    text: clipRoot.displayName
+                    font.pixelSize: 9
+                    color: Qt.rgba(1, 1, 1, 0.5)
+                    elide: Text.ElideRight
+                    width: parent.width - 8
+                    horizontalAlignment: Text.AlignHCenter
+                }
+            }
+
             // ---- Video thumbnail strip (top section) ----
             Row {
                 id: thumbRow
@@ -1461,27 +2289,39 @@ Item {
 
                 Repeater {
                     model: thumbCount
-                    delegate: Image {
+                    delegate: Item {
                         required property int index
                         width: thumbCellWidth
                         height: clipBody.thumbAreaHeight
-                        fillMode: Image.PreserveAspectCrop
-                        property real timeSec: duration > 0
-                            ? (thumbCount > 1
-                                ? visStartTime + (index / (thumbCount - 1)) * (visEndTime - visStartTime)
-                                : (visStartTime + visEndTime) / 2)
-                            : 0
-                        source: pathB64 !== ""
-                            ? "image://videothumbnail/" + pathB64 + "@" + timeSec.toFixed(1)
-                              + "@" + Math.round(height)
-                            : ""
-                        cache: true
-                        asynchronous: true
 
+                        Image {
+                            id: thumbImg
+                            anchors.fill: parent
+                            fillMode: Image.PreserveAspectCrop
+                            property real timeSec: clipRoot.duration > 0
+                                ? (thumbCount > 1
+                                    ? visStartTime + (index / (thumbCount - 1)) * (visEndTime - visStartTime)
+                                    : (visStartTime + visEndTime) / 2)
+                                : 0
+                            source: pathB64 !== ""
+                                ? "image://videothumbnail/" + pathB64 + "@" + timeSec.toFixed(1)
+                                  + "@" + Math.round(height)
+                                : ""
+                            cache: true
+                            asynchronous: true
+
+                            // Fade in when thumbnail loads
+                            opacity: status === Image.Ready ? 1.0 : 0.0
+                            Behavior on opacity {
+                                NumberAnimation { duration: 250; easing.type: Easing.OutCubic }
+                            }
+                        }
+
+                        // Placeholder while loading
                         Rectangle {
                             anchors.fill: parent
-                            visible: parent.status !== Image.Ready
-                            color: Qt.rgba(clipColor.r, clipColor.g, clipColor.b, 0.15)
+                            visible: thumbImg.status !== Image.Ready
+                            color: Qt.rgba(clipColor.r, clipColor.g, clipColor.b, 0.10)
                         }
                     }
                 }
@@ -1587,6 +2427,255 @@ Item {
                 }
             }
 
+            // ---- Volume rubber band (inline volume automation) ----
+            Canvas {
+                id: volumeOverlay
+                anchors.fill: waveBar
+                visible: waveBar.visible && clipRoot.width > 30
+                z: 14
+
+                function volToY(vol, h) { return h * (1.0 - Math.min(2.0, Math.max(0, vol)) / 2.0) }
+                function yToVol(y, h) { return Math.max(0, Math.min(2.0, 2.0 * (1.0 - y / h))) }
+                function volToDb(vol) {
+                    if (vol <= 0.001) return "-\u221E"
+                    return (20 * Math.log10(vol)).toFixed(1)
+                }
+
+                onPaint: {
+                    var ctx = getContext("2d")
+                    ctx.clearRect(0, 0, width, height)
+                    if (width <= 0 || height <= 0) return
+                    var h = height
+                    var points = timelineNotifier ? timelineNotifier.clipVolumeKeyframes(clipId) : []
+
+                    // 0dB reference line (dashed)
+                    var zeroDbY = volToY(1.0, h)
+                    ctx.strokeStyle = Qt.rgba(1, 1, 1, 0.2)
+                    ctx.lineWidth = 1; ctx.setLineDash([4, 4])
+                    ctx.beginPath(); ctx.moveTo(0, zeroDbY); ctx.lineTo(width, zeroDbY); ctx.stroke()
+                    ctx.setLineDash([])
+
+                    if (points.length === 0) {
+                        var flatVol = (clipRoot.clipInfo && clipRoot.clipInfo.volume !== undefined)
+                            ? clipRoot.clipInfo.volume : 1.0
+                        var flatY = volToY(flatVol, h)
+                        ctx.strokeStyle = Qt.rgba(1, 0.84, 0.0, 0.6)
+                        ctx.lineWidth = 1.5
+                        ctx.beginPath(); ctx.moveTo(0, flatY); ctx.lineTo(width, flatY); ctx.stroke()
+                        return
+                    }
+
+                    // Draw automation curve
+                    ctx.strokeStyle = "#FFCA28"
+                    ctx.lineWidth = 2
+                    ctx.beginPath()
+                    var firstX = points[0].normalizedTime * width
+                    var firstY = volToY(points[0].value, h)
+                    ctx.moveTo(0, firstY)
+                    ctx.lineTo(firstX, firstY)
+                    for (var i = 1; i < points.length; i++) {
+                        var px = points[i].normalizedTime * width
+                        var py = volToY(points[i].value, h)
+                        ctx.lineTo(px, py)
+                    }
+                    var lastY = volToY(points[points.length - 1].value, h)
+                    ctx.lineTo(width, lastY)
+                    ctx.stroke()
+
+                    // Semi-transparent fill below curve
+                    ctx.fillStyle = Qt.rgba(1, 0.79, 0.16, 0.06)
+                    ctx.lineTo(width, h)
+                    ctx.lineTo(0, h)
+                    ctx.closePath()
+                    ctx.fill()
+
+                    // Control point dots
+                    for (var j = 0; j < points.length; j++) {
+                        var dx = points[j].normalizedTime * width
+                        var dy = volToY(points[j].value, h)
+                        ctx.fillStyle = "#FFCA28"
+                        ctx.beginPath(); ctx.arc(dx, dy, 5, 0, Math.PI * 2); ctx.fill()
+                        ctx.strokeStyle = "#0A0A18"; ctx.lineWidth = 1.5
+                        ctx.beginPath(); ctx.arc(dx, dy, 5, 0, Math.PI * 2); ctx.stroke()
+                    }
+                }
+
+                Timer {
+                    id: _volRepaintTimer; interval: 100; repeat: false
+                    onTriggered: { if (volumeOverlay.visible) volumeOverlay.requestPaint() }
+                }
+                Connections {
+                    target: timelineNotifier
+                    function onTracksChanged() {
+                        if (volumeOverlay.visible) _volRepaintTimer.restart()
+                    }
+                }
+            }
+
+            // Volume rubber band MouseArea (interactive point dragging)
+            MouseArea {
+                id: volumeDragMa
+                anchors.fill: waveBar
+                visible: volumeOverlay.visible
+                z: 15
+                hoverEnabled: true
+                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                cursorShape: _nearPoint >= 0 ? Qt.SizeVerCursor : Qt.CrossCursor
+
+                property int _nearPoint: -1
+                property int _draggingIdx: -1
+                property real _dragOrigTime: 0
+                property var _points: []
+                // Rubber band segment dragging
+                property int _rubberSeg: -1
+                property real _rubberStartY: 0
+                property real _rubberOrigA: 0
+                property real _rubberOrigB: 0
+
+                function findNearPoint(mx, my) {
+                    _points = timelineNotifier ? timelineNotifier.clipVolumeKeyframes(clipId) : []
+                    var w = volumeOverlay.width, h = volumeOverlay.height
+                    for (var i = 0; i < _points.length; i++) {
+                        var px = _points[i].normalizedTime * w
+                        var py = volumeOverlay.volToY(_points[i].value, h)
+                        if (Math.abs(mx - px) < 8 && Math.abs(my - py) < 8)
+                            return i
+                    }
+                    return -1
+                }
+
+                function findSegmentAtX(normX) {
+                    for (var i = 0; i < _points.length - 1; i++) {
+                        if (normX >= _points[i].normalizedTime && normX <= _points[i + 1].normalizedTime)
+                            return i
+                    }
+                    return -1
+                }
+
+                function interpolateVol(normX) {
+                    if (_points.length === 0) return 1.0
+                    if (normX <= _points[0].normalizedTime) return _points[0].value
+                    if (normX >= _points[_points.length - 1].normalizedTime) return _points[_points.length - 1].value
+                    for (var i = 0; i < _points.length - 1; i++) {
+                        var a = _points[i], b = _points[i + 1]
+                        if (normX >= a.normalizedTime && normX <= b.normalizedTime) {
+                            var t = (normX - a.normalizedTime) / (b.normalizedTime - a.normalizedTime)
+                            return a.value + t * (b.value - a.value)
+                        }
+                    }
+                    return 1.0
+                }
+
+                onPositionChanged: function(mouse) {
+                    if (_draggingIdx >= 0 && pressed) {
+                        var newNorm = Math.max(0, Math.min(1, mouse.x / volumeOverlay.width))
+                        var newTime = newNorm * clipRoot.duration
+                        var newVol = volumeOverlay.yToVol(mouse.y, volumeOverlay.height)
+                        timelineNotifier.moveVolumeKeyframe(clipId, _dragOrigTime, newTime, newVol)
+                        _dragOrigTime = newTime
+                        volTipLbl.text = volumeOverlay.volToDb(newVol) + " dB"
+                        volumeDragTip.x = mouse.x + 12
+                        volumeDragTip.y = Math.max(0, mouse.y - 24)
+                        volumeDragTip.visible = true
+                        volumeOverlay.requestPaint()
+                    } else if (_rubberSeg >= 0 && pressed) {
+                        // Rubber band: move segment up/down
+                        var dy = mouse.y - _rubberStartY
+                        var dVol = -dy / volumeOverlay.height * 2.0
+                        var newA = Math.max(0, Math.min(2.0, _rubberOrigA + dVol))
+                        var newB = Math.max(0, Math.min(2.0, _rubberOrigB + dVol))
+                        var pts = timelineNotifier.clipVolumeKeyframes(clipId)
+                        if (_rubberSeg < pts.length - 1) {
+                            timelineNotifier.moveVolumeKeyframe(clipId, pts[_rubberSeg].time, pts[_rubberSeg].time, newA)
+                            pts = timelineNotifier.clipVolumeKeyframes(clipId)
+                            if (_rubberSeg + 1 < pts.length)
+                                timelineNotifier.moveVolumeKeyframe(clipId, pts[_rubberSeg + 1].time, pts[_rubberSeg + 1].time, newB)
+                        }
+                        var avgVol = (newA + newB) / 2
+                        volTipLbl.text = volumeOverlay.volToDb(avgVol) + " dB"
+                        volumeDragTip.x = mouse.x + 12
+                        volumeDragTip.y = Math.max(0, mouse.y - 24)
+                        volumeDragTip.visible = true
+                        volumeOverlay.requestPaint()
+                    } else if (!pressed) {
+                        _nearPoint = findNearPoint(mouse.x, mouse.y)
+                    }
+                }
+
+                onPressed: function(mouse) {
+                    _points = timelineNotifier ? timelineNotifier.clipVolumeKeyframes(clipId) : []
+                    _nearPoint = findNearPoint(mouse.x, mouse.y)
+
+                    if (mouse.button === Qt.RightButton && _nearPoint >= 0) {
+                        timelineNotifier.removeKeyframe(clipId, 5, _points[_nearPoint].time)
+                        _nearPoint = -1
+                        volumeOverlay.requestPaint()
+                        mouse.accepted = true
+                        return
+                    }
+
+                    if (mouse.button === Qt.LeftButton) {
+                        if (_nearPoint >= 0) {
+                            _draggingIdx = _nearPoint
+                            _dragOrigTime = _points[_nearPoint].time
+                            _rubberSeg = -1
+                        } else {
+                            // Check if on the line (rubber band)
+                            var normX = mouse.x / volumeOverlay.width
+                            if (_points.length >= 2) {
+                                var lineVol = interpolateVol(normX)
+                                var lineY = volumeOverlay.volToY(lineVol, volumeOverlay.height)
+                                if (Math.abs(mouse.y - lineY) < 6) {
+                                    _rubberSeg = findSegmentAtX(normX)
+                                    if (_rubberSeg >= 0) {
+                                        _rubberStartY = mouse.y
+                                        _rubberOrigA = _points[_rubberSeg].value
+                                        _rubberOrigB = _points[_rubberSeg + 1].value
+                                        _draggingIdx = -1
+                                        return
+                                    }
+                                }
+                            }
+                            // Click on empty space: create new keyframe
+                            var newTime = normX * clipRoot.duration
+                            var newVol = volumeOverlay.yToVol(mouse.y, volumeOverlay.height)
+                            timelineNotifier.addKeyframe(clipId, 5, newTime, newVol)
+                            volumeOverlay.requestPaint()
+                            _points = timelineNotifier.clipVolumeKeyframes(clipId)
+                            _nearPoint = findNearPoint(mouse.x, mouse.y)
+                            if (_nearPoint >= 0) {
+                                _draggingIdx = _nearPoint
+                                _dragOrigTime = newTime
+                            }
+                            _rubberSeg = -1
+                        }
+                    }
+                }
+
+                onReleased: {
+                    _draggingIdx = -1
+                    _rubberSeg = -1
+                    volumeDragTip.visible = false
+                }
+
+                onExited: {
+                    _nearPoint = -1
+                    volumeDragTip.visible = false
+                }
+
+                // dB tooltip
+                Rectangle {
+                    id: volumeDragTip
+                    visible: false; z: 200
+                    width: volTipLbl.implicitWidth + 10; height: 18; radius: 3
+                    color: "#1A1A30"; border.color: "#FFCA28"; border.width: 1
+                    Label {
+                        id: volTipLbl; anchors.centerIn: parent
+                        font.pixelSize: 9; font.weight: Font.Bold; color: "#FFCA28"
+                    }
+                }
+            }
+
             // ---- Color tag bar (colored strip at very top of clip) ----
             Rectangle {
                 id: colorTagBar
@@ -1647,13 +2736,165 @@ Item {
                         color: "#FF7043"
                     }
 
+                    // Freeze frame snowflake badge
+                    Rectangle {
+                        visible: isFreezeFrame
+                        width: freezeLbl.implicitWidth + 6; height: 14; radius: 3
+                        color: Qt.rgba(0.53, 0.81, 0.92, 0.25)
+                        border.color: "#87CEEB"; border.width: 0.5
+                        Label {
+                            id: freezeLbl; anchors.centerIn: parent
+                            text: "\u2744 Freeze"
+                            font.pixelSize: 8; font.weight: Font.Bold
+                            color: "#87CEEB"
+                        }
+                    }
+
+                    // FX badge — shows effect count, clickable to open effects panel
+                    Rectangle {
+                        visible: hasEffects || hasColorGrading
+                        width: fxLbl.implicitWidth + 6; height: 14; radius: 3
+                        color: Qt.rgba(0.67, 0.28, 0.74, 0.25)
+                        border.color: "#AB47BC"; border.width: 0.5
+                        Label {
+                            id: fxLbl; anchors.centerIn: parent
+                            text: "FX" + (effectCount > 0 ? " " + effectCount : "")
+                            font.pixelSize: 8; font.weight: Font.Bold
+                            color: "#AB47BC"
+                        }
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                // Select clip and open Effects panel
+                                if (timelineNotifier && clipId >= 0) {
+                                    timelineNotifier.selectClip(clipId)
+                                    timelineNotifier.setActivePanel(3)  // effects panel
+                                }
+                            }
+                        }
+                        ToolTip.visible: fxBadgeHov.hovered
+                        ToolTip.text: effectCount + " effect(s)" + (hasColorGrading ? " + color grading" : "")
+                        HoverHandler { id: fxBadgeHov }
+                    }
+
+                    // TR badge — transition applied
+                    Rectangle {
+                        visible: hasTransition
+                        width: trBadgeLbl.implicitWidth + 6; height: 14; radius: 3
+                        color: Qt.rgba(0.15, 0.78, 0.85, 0.25)
+                        border.color: "#26C6DA"; border.width: 0.5
+                        Label {
+                            id: trBadgeLbl; anchors.centerIn: parent
+                            text: "TR"
+                            font.pixelSize: 8; font.weight: Font.Bold
+                            color: "#26C6DA"
+                        }
+                        MouseArea {
+                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (timelineNotifier && clipId >= 0) {
+                                    timelineNotifier.selectClip(clipId)
+                                    timelineNotifier.setActivePanel(5)  // transitions panel
+                                }
+                            }
+                        }
+                        ToolTip.visible: trBadgeHov.hovered
+                        ToolTip.text: "Transition applied"
+                        HoverHandler { id: trBadgeHov }
+                    }
+
                     // Speed badge
                     Label {
-                        visible: speed !== 1.0 || hasSpeedRamp
+                        visible: (speed !== 1.0 || hasSpeedRamp) && !isFreezeFrame
                         text: hasSpeedRamp ? "RAMP" : (speed.toFixed(1) + "x")
                         font.pixelSize: 9; font.weight: Font.Bold
                         color: "#FFCA28"
                     }
+                }
+            }
+
+            // ---- Transition zone overlays on clip edges ----
+            // Transition In zone (left edge)
+            Rectangle {
+                visible: transitionInType > 0 && clipRoot.width > 20
+                x: 0; y: 0; z: 8
+                width: Math.max(4, transitionInDur * pps)
+                height: parent.height
+                color: Qt.rgba(0.15, 0.78, 0.85, 0.15)
+                border.color: "#26C6DA"; border.width: 0.5
+                radius: 2
+
+                // Diagonal gradient lines
+                Canvas {
+                    anchors.fill: parent; visible: parent.width > 8
+                    onPaint: {
+                        var ctx = getContext("2d")
+                        ctx.clearRect(0, 0, width, height)
+                        ctx.strokeStyle = "#26C6DA"
+                        ctx.lineWidth = 0.5; ctx.globalAlpha = 0.4
+                        for (var i = -height; i < width; i += 8) {
+                            ctx.beginPath(); ctx.moveTo(i, height); ctx.lineTo(i + height, 0); ctx.stroke()
+                        }
+                    }
+                }
+            }
+
+            // Transition Out zone (right edge)
+            Rectangle {
+                visible: transitionOutType > 0 && clipRoot.width > 20
+                anchors.right: parent.right; y: 0; z: 8
+                width: Math.max(4, transitionOutDur * pps)
+                height: parent.height
+                color: Qt.rgba(0.15, 0.78, 0.85, 0.15)
+                border.color: "#26C6DA"; border.width: 0.5
+                radius: 2
+
+                Canvas {
+                    anchors.fill: parent; visible: parent.width > 8
+                    onPaint: {
+                        var ctx = getContext("2d")
+                        ctx.clearRect(0, 0, width, height)
+                        ctx.strokeStyle = "#26C6DA"
+                        ctx.lineWidth = 0.5; ctx.globalAlpha = 0.4
+                        for (var i = -height; i < width; i += 8) {
+                            ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i + height, height); ctx.stroke()
+                        }
+                    }
+                }
+            }
+
+            // ---- Freeze frame snowflake overlay (centered on clip body) ----
+            Label {
+                visible: isFreezeFrame && clipRoot.width > 20 && customLabel === ""
+                anchors.centerIn: parent
+                text: "\u2744"
+                font.pixelSize: Math.min(36, clipRoot.height * 0.5)
+                color: "#87CEEB"; opacity: 0.4
+                style: Text.Outline; styleColor: Qt.rgba(0, 0, 0, 0.3)
+            }
+
+            // ---- Transition drop zone ----
+            DropArea {
+                anchors.fill: parent; z: 6
+                keys: ["application/x-gopost-transition"]
+
+                Rectangle {
+                    anchors.fill: parent; visible: parent.containsDrag
+                    color: Qt.rgba(0.15, 0.78, 0.85, 0.15)
+                    border.color: "#26C6DA"; border.width: 1.5; radius: 4
+                    Label { anchors.centerIn: parent; text: "Drop transition here"; font.pixelSize: 10; color: "#26C6DA" }
+                }
+
+                onDropped: drop => {
+                    var data
+                    if (drop.hasText) {
+                        try { data = JSON.parse(drop.text) } catch(e) { return }
+                    }
+                    if (!data || data.type !== "transition") return
+                    if (timelineNotifier && clipId >= 0) {
+                        timelineNotifier.setTransitionIn(clipId, data.transType, 0.5, 3)
+                    }
+                    drop.accept()
                 }
             }
 
@@ -1697,6 +2938,62 @@ Item {
                 HoverHandler { id: linkHov }
             }
 
+            // ---- Disabled clip overlay (dimmed + diagonal stripes) ----
+            Rectangle {
+                anchors.fill: parent
+                radius: 4; z: 16
+                visible: isDisabled
+                color: Qt.rgba(0.05, 0.05, 0.08, 0.55)
+
+                Canvas {
+                    anchors.fill: parent
+                    visible: parent.visible
+                    onVisibleChanged: if (visible) requestPaint()
+                    onWidthChanged: if (visible) requestPaint()
+                    onHeightChanged: if (visible) requestPaint()
+                    onPaint: {
+                        var ctx = getContext("2d")
+                        ctx.clearRect(0, 0, width, height)
+                        ctx.strokeStyle = "#505068"
+                        ctx.lineWidth = 1
+                        ctx.globalAlpha = 0.4
+                        for (var i = -height; i < width + height; i += 12) {
+                            ctx.beginPath()
+                            ctx.moveTo(i, height)
+                            ctx.lineTo(i + height, 0)
+                            ctx.stroke()
+                        }
+                    }
+                }
+
+                // "DISABLED" label centered
+                Label {
+                    anchors.centerIn: parent
+                    visible: parent.width > 60
+                    text: "DISABLED"
+                    font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1
+                    color: "#808098"
+                    style: Text.Outline; styleColor: Qt.rgba(0, 0, 0, 0.5)
+                }
+            }
+
+            // ---- Speaker-off icon for muted audio clips ----
+            Rectangle {
+                visible: isDisabled && sourceType === 5  // audio clips
+                anchors.bottom: parent.bottom; anchors.right: parent.right
+                anchors.rightMargin: 4; anchors.bottomMargin: 2
+                width: 18; height: 14; radius: 3; z: 17
+                color: Qt.rgba(0.94, 0.33, 0.31, 0.25)
+                border.color: "#EF5350"; border.width: 0.5
+                Label {
+                    anchors.centerIn: parent
+                    text: "\uD83D\uDD07"; font.pixelSize: 9
+                }
+                ToolTip.text: "Audio muted (clip disabled)"
+                ToolTip.visible: muteIconHov.hovered
+                HoverHandler { id: muteIconHov }
+            }
+
             // ---- Playhead-in-range subtle highlight ----
             Rectangle {
                 anchors.fill: parent
@@ -1714,6 +3011,66 @@ Item {
                 visible: playheadInRange
                 color: clipColor
                 opacity: 0.4
+            }
+
+            // ---- Duplicate frame detection overlay (red hatching at bottom) ----
+            Item {
+                id: dupeOverlay
+                anchors.left: parent.left; anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 6
+                z: 14
+                visible: timelineNotifier && timelineNotifier.duplicateFrameDetectionEnabled
+                         && clipRoot.width > 10 && dupeOverlay._hasDuplicates
+
+                // Cache the overlap query result; re-evaluate when trackGeneration changes
+                readonly property var _overlaps: {
+                    if (!timelineNotifier || !timelineNotifier.duplicateFrameDetectionEnabled
+                        || clipId < 0 || timelineNotifier.trackGeneration < 0)
+                        return []
+                    return timelineNotifier.duplicateFrameOverlaps(clipId)
+                }
+                readonly property bool _hasDuplicates: _overlaps.length > 0
+
+                // Red hatching canvas
+                Canvas {
+                    anchors.fill: parent
+                    visible: parent.visible
+                    onVisibleChanged: if (visible) requestPaint()
+                    onWidthChanged: if (visible) requestPaint()
+                    onHeightChanged: if (visible) requestPaint()
+                    onPaint: {
+                        var ctx = getContext("2d")
+                        ctx.clearRect(0, 0, width, height)
+                        // Red semi-transparent background
+                        ctx.fillStyle = Qt.rgba(0.94, 0.33, 0.31, 0.35)
+                        ctx.fillRect(0, 0, width, height)
+                        // Diagonal hatching lines
+                        ctx.strokeStyle = "#EF5350"
+                        ctx.lineWidth = 1
+                        ctx.globalAlpha = 0.6
+                        for (var i = -height; i < width + height; i += 6) {
+                            ctx.beginPath()
+                            ctx.moveTo(i, height)
+                            ctx.lineTo(i + height, 0)
+                            ctx.stroke()
+                        }
+                    }
+                }
+
+                // Tooltip on hover showing which clips share frames
+                ToolTip.visible: dupeHov.hovered && dupeOverlay._hasDuplicates
+                ToolTip.text: {
+                    if (!dupeOverlay._hasDuplicates) return ""
+                    var lines = []
+                    for (var i = 0; i < dupeOverlay._overlaps.length; i++) {
+                        var o = dupeOverlay._overlaps[i]
+                        lines.push("\"" + o.displayName + "\" (track " + (o.trackIndex + 1)
+                                   + ") — " + o.overlapDuration.toFixed(1) + "s shared")
+                    }
+                    return "Duplicate frames with:\n" + lines.join("\n")
+                }
+                HoverHandler { id: dupeHov }
             }
 
             // ---- Dashed border for speed-ramped clips ----
@@ -1833,7 +3190,11 @@ Item {
         MouseArea {
             id: clipBodyMa
             anchors.fill: parent
-            cursorShape: dragActive ? Qt.ClosedHandCursor : Qt.PointingHandCursor
+            cursorShape: {
+                if (timelineNotifier && timelineNotifier.razorModeEnabled)
+                    return Qt.CrossCursor
+                return dragActive ? Qt.ClosedHandCursor : Qt.PointingHandCursor
+            }
             acceptedButtons: Qt.LeftButton | Qt.RightButton
             hoverEnabled: true
 
@@ -1844,9 +3205,37 @@ Item {
             property int origTrackIndex: -1
             property bool hasCollision: false
             property real snapEdgeX: -1  // x position of active snap line (-1 = hidden)
+            property bool cachedMagneticTarget: false  // cached at drag start
 
             onPressed: function(mouse) {
                 if (mouse.button === Qt.RightButton) return
+
+                // Grab keyboard focus so shortcut keys (D, M, C, V, etc.) work
+                root.forceActiveFocus()
+
+                // ---- Razor/Blade tool: click-to-cut ----
+                if (timelineNotifier && timelineNotifier.razorModeEnabled
+                    && mouse.button === Qt.LeftButton && clipId >= 0) {
+                    // Calculate the timeline position from click coordinates
+                    var clickXInLane = mapToItem(clipRoot.parent, mouse.x, 0).x
+                    var cutTime = clickXInLane / pps
+                    if (mouse.modifiers & Qt.ShiftModifier) {
+                        // Shift+click: through-cut all tracks at this position
+                        timelineNotifier.splitAllAtPosition(cutTime)
+                    } else {
+                        // Normal click: cut only this clip
+                        timelineNotifier.splitClipAtPosition(clipId, cutTime)
+                    }
+                    // Show cut line animation
+                    root._razorCutX = clipRoot.x + mouse.x
+                    root._razorCutTrackY = clipRoot.parent
+                        ? clipRoot.parent.mapToItem(trackFlick.contentItem, 0, 0).y : 0
+                    root._razorCutVisible = true
+                    razorCutTimer.restart()
+                    mouse.accepted = true
+                    return  // don't start drag
+                }
+
                 dragActive = false
                 hasCollision = false
                 snapEdgeX = -1
@@ -1855,11 +3244,28 @@ Item {
                 origTimelineIn = clipRoot.timelineIn
                 origTrackIndex = clipRoot.trackIndex
                 root._anyClipDragging = false
+                // Cache magnetic state at drag start (avoid per-frame Q_INVOKABLE calls)
+                cachedMagneticTarget = timelineNotifier
+                    && timelineNotifier.magneticTimelineEnabled
+                    && !timelineNotifier.positionOverrideActive
+                    && timelineNotifier.isTrackMagneticPrimary(clipRoot.trackIndex)
 
-                // Feature 13: Ctrl+Click toggles multi-select
+                // Selection modes: Ctrl+Click, Shift+Click, Alt+Click
                 if (timelineNotifier && clipId >= 0) {
                     if (mouse.modifiers & Qt.ControlModifier) {
+                        // Ctrl+Click: toggle individual clip in/out of selection
                         timelineNotifier.toggleClipSelection(clipId)
+                    } else if (mouse.modifiers & Qt.ShiftModifier) {
+                        // Shift+Click: range select from last selected to this clip
+                        var lastSel = timelineNotifier.selectedClipId
+                        if (lastSel >= 0) {
+                            timelineNotifier.selectClipRange(lastSel, clipId)
+                        } else {
+                            timelineNotifier.selectClip(clipId)
+                        }
+                    } else if ((mouse.modifiers & Qt.AltModifier) && linkedId >= 0) {
+                        // Alt+Click on linked clip: select only this portion independently
+                        timelineNotifier.selectClip(clipId)
                     } else if (timelineNotifier.isClipSelected(clipId) &&
                                timelineNotifier.selectedClipCount > 1) {
                         // Already part of multi-selection — don't deselect others
@@ -1874,8 +3280,70 @@ Item {
                 && timelineNotifier.selectedClipCount > 1
                 && timelineNotifier.isClipSelected(clipId)
 
+            onExited: {
+                cutPreviewTimer.stop()
+                root._cutPreviewVisible = false
+            }
+
             onPositionChanged: function(mouse) {
+                // Cut-point hover detection (when not pressed/dragging)
+                if (!pressed && !dragActive) {
+                    var edgeThreshold = 12
+                    var atLeftEdge = mouse.x < edgeThreshold
+                    var atRightEdge = mouse.x > (clipRoot.width - edgeThreshold)
+
+                    if (!atLeftEdge && !atRightEdge) {
+                        // Fast path: not near any edge — dismiss preview if showing, skip C++ calls
+                        if (root._cutPreviewVisible || cutPreviewTimer.running) {
+                            cutPreviewTimer.stop(); root._cutPreviewVisible = false
+                        }
+                        return
+                    }
+
+                    if (atLeftEdge || atRightEdge) {
+                        var adjClip = internal.findAdjacentClip(clipRoot.trackIndex, clipRoot.clipIndex, atLeftEdge ? "left" : "right")
+                        if (adjClip) {
+                            var gPos = mapToItem(root, mouse.x, mouse.y)
+                            root._cutPreviewX = gPos.x
+                            root._cutPreviewY = gPos.y
+
+                            if (atRightEdge) {
+                                root._cutPreviewSourceA = clipRoot.sourcePath
+                                root._cutPreviewTimeA = Math.max(0, clipRoot.sourceOut - 0.1)
+                                root._cutPreviewNameA = clipRoot.displayName
+                                root._cutPreviewSourceB = adjClip.sourcePath || ""
+                                root._cutPreviewTimeB = (adjClip.sourceIn || 0) + 0.1
+                                root._cutPreviewNameB = adjClip.displayName || ""
+                                root._cutPreviewTransType = clipRoot.transitionOutType
+                                root._cutPreviewTransDur = clipRoot.transitionOutDur
+                            } else {
+                                root._cutPreviewSourceA = adjClip.sourcePath || ""
+                                root._cutPreviewTimeA = Math.max(0, (adjClip.sourceOut || 0) - 0.1)
+                                root._cutPreviewNameA = adjClip.displayName || ""
+                                root._cutPreviewSourceB = clipRoot.sourcePath
+                                root._cutPreviewTimeB = clipRoot.sourceIn + 0.1
+                                root._cutPreviewNameB = clipRoot.displayName
+                                root._cutPreviewTransType = clipRoot.transitionInType
+                                root._cutPreviewTransDur = clipRoot.transitionInDur
+                            }
+
+                            if (!cutPreviewTimer.running && !root._cutPreviewVisible)
+                                cutPreviewTimer.restart()
+                            return
+                        }
+                    }
+                    // Not at a cut point — dismiss preview
+                    if (root._cutPreviewVisible || cutPreviewTimer.running) {
+                        cutPreviewTimer.stop()
+                        root._cutPreviewVisible = false
+                    }
+                    return
+                }
+
                 if (!pressed) return
+                // Dismiss preview when dragging starts
+                if (dragActive) { cutPreviewTimer.stop(); root._cutPreviewVisible = false }
+
                 var curX = mapToItem(clipRoot.parent, mouse.x, 0).x
                 var deltaX = curX - dragStartMouseX
 
@@ -1941,7 +3409,18 @@ Item {
                 root._insertIndicatorVisible = false
                 root._insertIndicatorTime = -1
 
-                if (!_isGroupDrag && !showAbove && !showBelow) {
+                // Magnetic timeline: use cached value (computed at drag start, not per-frame)
+                var isMagneticDrag = cachedMagneticTarget
+
+                if (!_isGroupDrag && !showAbove && !showBelow && isMagneticDrag) {
+                    // Show insertion indicator on magnetic track (no collision highlight)
+                    var insertResult2 = internal.findInsertionPoint(targetTrack, bestTime, clipId)
+                    if (insertResult2) {
+                        root._insertIndicatorTime = insertResult2.time
+                        root._insertIndicatorX = headerWidth + insertResult2.time * pps - trackFlick.contentX
+                        root._insertIndicatorVisible = true
+                    }
+                } else if (!_isGroupDrag && !showAbove && !showBelow) {
                     var moveIn = bestTime
                     var moveOut = bestTime + clipRoot.duration
                     var trackClipCount2 = (targetTrack >= 0 && targetTrack < trackCount)
@@ -1969,8 +3448,41 @@ Item {
                 }
 
                 clipRoot.x = bestTime * pps
+
+                // Cross-timeline drag detection (stacked mode only)
+                if (isStacked && dragActive) {
+                    var crossGlobalY = mapToItem(root, 0, mouse.y).y
+                    var secTop = stackedDivider.y + stackedDivider.height
+                    if (crossGlobalY > secTop) {
+                        root._crossTimelineDragActive = true
+                        var relY = crossGlobalY - secTop - secondarySection.secHeaderH - secondarySection.secRulerH
+                        root._crossTimelineDragTrack = Math.max(0, Math.floor(relY / secondarySection.secTrackH))
+                        var secTime = (mapToItem(secFlick, mouse.x, 0).x + secFlick.contentX - secondarySection.secLabelW) / secondaryPps
+                        root._crossTimelineDragTime = Math.max(0, secTime)
+                    } else {
+                        root._crossTimelineDragActive = false
+                    }
+                }
             }
             onReleased: function(mouse) {
+                // Cross-timeline drop (stacked mode)
+                if (root._crossTimelineDragActive && isStacked && dragActive
+                    && timelineNotifier && clipId >= 0) {
+                    timelineNotifier.moveClipToSecondaryTimeline(
+                        clipId, root._crossTimelineDragTrack, root._crossTimelineDragTime)
+                    dragActive = false
+                    hasCollision = false; snapEdgeX = -1
+                    internal.showSnapGuide(null)
+                    root._crossTimelineDragActive = false
+                    root._insertIndicatorVisible = false; root._insertIndicatorTime = -1
+                    root._showNewTrackAbove = false; root._showNewTrackBelow = false
+                    root._anyClipDragging = false
+                    clipRoot.x = Qt.binding(function() { return clipRoot.timelineIn * pps })
+                    emptyTrackCleanupTimer.restart()
+                    return
+                }
+                root._crossTimelineDragActive = false
+
                 var createdNewTrack = root._showNewTrackAbove || root._showNewTrackBelow
 
                 if (dragActive && timelineNotifier && clipId >= 0) {
@@ -2009,8 +3521,13 @@ Item {
                             trackCount - 1))
                         var targetTrack = internal.findCompatibleTrack(rawTrack, sourceType)
 
-                        // If insertion indicator is showing, use insert/overwrite mode
-                        if (root._insertIndicatorVisible && root._insertIndicatorTime >= 0) {
+                        // Magnetic timeline: use cached value from drag start
+                        var isMagneticTarget = cachedMagneticTarget
+
+                        if (isMagneticTarget) {
+                            // Magnetic: moveClip handles insert-and-compact
+                            timelineNotifier.moveClip(clipId, targetTrack, newTime)
+                        } else if (root._insertIndicatorVisible && root._insertIndicatorTime >= 0) {
                             var insertTime = root._insertIndicatorTime
                             if (timelineNotifier.insertMode) {
                                 timelineNotifier.reorderClipInsert(clipId, targetTrack, insertTime)
@@ -2056,9 +3573,62 @@ Item {
                 }
             }
             onDoubleClicked: {
-                if (timelineNotifier && clipId >= 0)
-                    timelineNotifier.setActivePanel(1)
+                if (timelineNotifier && clipId >= 0) {
+                    // Double-click opens compound clip as new tab, or inspector for non-compound
+                    if (sourceType === 0 || sourceType === 5) {
+                        // Video/Audio clips: open as compound clip in new tab
+                        timelineNotifier.openCompoundClip(clipId)
+                    } else {
+                        timelineNotifier.setActivePanel(1)
+                    }
+                }
             }
+        }
+
+        // Connected clip indicator — small orange anchor line at bottom
+        Rectangle {
+            visible: clipRoot.isConnectedClip
+            anchors.bottom: parent.bottom
+            anchors.left: parent.left
+            anchors.right: parent.right
+            height: 3; z: 12
+            color: "#FF7043"
+            radius: 1
+        }
+        // Connected clip anchor icon
+        Label {
+            visible: clipRoot.isConnectedClip
+            text: "\u2693"  // anchor symbol
+            font.pixelSize: 9
+            color: "#FF7043"
+            anchors.bottom: parent.bottom
+            anchors.left: parent.left
+            anchors.leftMargin: 2
+            anchors.bottomMargin: 3
+            z: 13
+        }
+
+        // Linked audio/video sync indicator (dashed blue line + icon)
+        Item {
+            visible: clipRoot.linkedId >= 0
+            anchors.bottom: parent.bottom
+            anchors.left: parent.left; anchors.right: parent.right
+            height: 2; z: 12
+
+            Row {
+                anchors.fill: parent; spacing: 4
+                Repeater {
+                    model: Math.max(0, Math.floor(parent.width / 8))
+                    Rectangle { width: 4; height: 2; color: "#42A5F5" }
+                }
+            }
+        }
+        Label {
+            visible: clipRoot.linkedId >= 0
+            text: clipRoot.sourceType === 5 ? "\uD83C\uDFB5" : "\uD83D\uDD07"
+            font.pixelSize: 9; color: "#42A5F5"
+            anchors.bottom: parent.bottom; anchors.right: parent.right
+            anchors.rightMargin: 4; anchors.bottomMargin: 2; z: 13
         }
 
         // Collision overlay — red tint when dragging onto occupied space
@@ -2105,7 +3675,11 @@ Item {
                     maxIn = origOut - minDur
 
                     // Find left boundary: end of previous clip on same track, or 0
-                    minBound = 0
+                    // Also clamp by source extent: can't extend left beyond sourceIn=0
+                    var sourceLeftLimit = clipRoot.sourceDuration > 0
+                        ? origIn - (clipRoot.sourceIn / Math.max(0.01, clipRoot.speed))
+                        : 0
+                    minBound = Math.max(0, sourceLeftLimit)
                     if (timelineNotifier) {
                         var count = timelineNotifier.clipCountForTrack(clipRoot.trackIndex)
                         for (var i = 0; i < count; i++) {
@@ -2134,12 +3708,23 @@ Item {
                         internal.showSnapGuide(null)
                     }
 
-                    timelineNotifier.trimClip(clipId, newIn, origOut)
+                    // Apply edit based on active trim mode
+                    var mode = timelineNotifier.trimEditMode
+                    if (mode === 2) {
+                        // Roll: move edit point with neighbor
+                        timelineNotifier.rollEdit(clipId, true, newIn - origIn)
+                    } else if (mode === 3) {
+                        // Slip: shift source content inside clip
+                        timelineNotifier.slipEdit(clipId, delta)
+                    } else {
+                        // Normal / Ripple: standard trim (ripple handled in C++)
+                        timelineNotifier.trimClip(clipId, newIn, origOut)
+                    }
                 }
                 onReleased: internal.showSnapGuide(null)
             }
 
-            // Trim tooltip — in-point time
+            // Trim tooltip — in-point time + mode indicator
             Rectangle {
                 visible: trimLeftMa.pressed
                 x: 10; y: -2
@@ -2148,7 +3733,11 @@ Item {
                 Label {
                     id: trimLeftLabel; anchors.centerIn: parent
                     font.pixelSize: 9; font.family: "monospace"; font.weight: Font.Bold; color: "#FFF"
-                    text: "IN " + internal.formatTimecodeFF(clipRoot.timelineIn)
+                    text: {
+                        var mode = timelineNotifier ? timelineNotifier.trimEditMode : 0
+                        var prefix = ["IN", "RIPPLE", "ROLL", "SLIP", "SLIDE"][mode]
+                        return prefix + " " + internal.formatTimecodeFF(clipRoot.timelineIn)
+                    }
                 }
             }
         }
@@ -2188,7 +3777,11 @@ Item {
                     minOut = origIn + minDur
 
                     // Find right boundary: start of next clip on same track
-                    maxBound = 99999
+                    // Also clamp by source extent: can't extend right beyond sourceDuration
+                    var sourceRightLimit = clipRoot.sourceDuration > 0
+                        ? origIn + ((clipRoot.sourceDuration - clipRoot.sourceIn) / Math.max(0.01, clipRoot.speed))
+                        : 99999
+                    maxBound = sourceRightLimit
                     if (timelineNotifier) {
                         var count = timelineNotifier.clipCountForTrack(clipRoot.trackIndex)
                         for (var i = 0; i < count; i++) {
@@ -2217,12 +3810,23 @@ Item {
                         internal.showSnapGuide(null)
                     }
 
-                    timelineNotifier.trimClip(clipId, origIn, newOut)
+                    // Apply edit based on active trim mode
+                    var mode = timelineNotifier.trimEditMode
+                    if (mode === 2) {
+                        // Roll: move edit point with neighbor
+                        timelineNotifier.rollEdit(clipId, false, newOut - origOut)
+                    } else if (mode === 4) {
+                        // Slide: move clip, neighbors adjust
+                        timelineNotifier.slideEdit(clipId, delta)
+                    } else {
+                        // Normal / Ripple: standard trim (ripple handled in C++)
+                        timelineNotifier.trimClip(clipId, origIn, newOut)
+                    }
                 }
                 onReleased: internal.showSnapGuide(null)
             }
 
-            // Trim tooltip — out-point time
+            // Trim tooltip — out-point time + mode indicator
             Rectangle {
                 visible: trimRightMa.pressed
                 anchors.right: parent.left; anchors.rightMargin: 2; y: -2
@@ -2231,7 +3835,11 @@ Item {
                 Label {
                     id: trimRightLabel; anchors.centerIn: parent
                     font.pixelSize: 9; font.family: "monospace"; font.weight: Font.Bold; color: "#FFF"
-                    text: "OUT " + internal.formatTimecodeFF(clipRoot.timelineIn + clipRoot.duration)
+                    text: {
+                        var mode = timelineNotifier ? timelineNotifier.trimEditMode : 0
+                        var prefix = ["OUT", "RIPPLE", "ROLL", "SLIP", "SLIDE"][mode]
+                        return prefix + " " + internal.formatTimecodeFF(clipRoot.timelineIn + clipRoot.duration)
+                    }
                 }
             }
         }
@@ -2275,8 +3883,76 @@ Item {
             return m + ":" + String(ss).padStart(2, "0")
         }
 
-        // Find the best insertion point on a track near the given time.
-        // Returns { time } at the nearest clip boundary, or null.
+        // Pre-compute and apply zoom BEFORE addClipsBatch so that when
+        // tracksChanged fires, QML creates clip items at the correct zoom
+        // level — avoids the 10-20s freeze from rendering at 100% zoom first.
+        function preComputeFitZoom(addedDurationSum) {
+            if (!root.autoFitOnImport || !timelineNotifier) return
+            var viewWidth = trackFlick.width
+            if (viewWidth <= 10) return
+            var currentDur = timelineNotifier.totalDuration
+            var expectedDur = currentDur + addedDurationSum
+            if (expectedDur <= 0) return
+            // If everything will fit at current zoom, no change needed
+            var totalSpanPx = expectedDur * pps
+            if (totalSpanPx <= viewWidth) return
+            // Zoom to fit expected total duration + 20% padding
+            var fitPps = viewWidth / (expectedDur * 1.2)
+            fitPps = Math.max(0.01, Math.min(400, fitPps))
+            timelineNotifier.setPixelsPerSecond(fitPps)
+        }
+
+        // Auto-fit timeline zoom to show all dropped clips (fine-tune after insertion)
+        function autoFitToClips(clipIds) {
+            if (!root.autoFitOnImport || !timelineNotifier || clipIds.length === 0) return
+
+            var totalDur = timelineNotifier.totalDuration
+            if (totalDur <= 0) return
+
+            // Single C++ call replaces the O(D x T x C) nested loop
+            var span = timelineNotifier.batchClipSpan(clipIds)
+            var dropMinIn  = span.minIn
+            var dropMaxOut = span.maxOut
+            if (dropMinIn >= dropMaxOut) return
+
+            // trackFlick.width already excludes headerWidth (it's parent.width - headerWidth)
+            var viewWidth = trackFlick.width
+            if (viewWidth <= 10) return
+
+            // Check if all timeline content already fits at current zoom
+            var totalSpanPx = totalDur * pps
+            if (totalSpanPx <= viewWidth) return  // everything fits, don't change
+
+            // Zoom to fit total duration + 10% padding
+            var fitPps = viewWidth / (totalDur * 1.2)
+            fitPps = Math.max(0.01, Math.min(400, fitPps))
+
+            timelineNotifier.setPixelsPerSecond(fitPps)
+
+            // Scroll to center on dropped clips
+            var midpoint = (dropMinIn + dropMaxOut) / 2
+            var scrollX = Math.max(0, midpoint * fitPps - viewWidth / 2)
+            timelineNotifier.setScrollOffset(scrollX)
+        }
+
+        function findAdjacentClip(trackIdx, clipIdx, direction) {
+            if (!timelineNotifier) return null
+            var clipCount = timelineNotifier.clipCountForTrack(trackIdx)
+            var adjIdx = direction === "left" ? clipIdx - 1 : clipIdx + 1
+            if (adjIdx < 0 || adjIdx >= clipCount) return null
+            var adj = timelineNotifier.clipData(trackIdx, adjIdx)
+            if (!adj || adj.clipId < 0) return null
+            var thisClip = timelineNotifier.clipData(trackIdx, clipIdx)
+            if (!thisClip) return null
+            var gap
+            if (direction === "right")
+                gap = Math.abs(adj.timelineIn - (thisClip.timelineIn + thisClip.duration))
+            else
+                gap = Math.abs(thisClip.timelineIn - (adj.timelineIn + adj.duration))
+            if (gap > 0.05) return null
+            return adj
+        }
+
         function findInsertionPoint(trackIdx, dropTime, excludeClipId) {
             if (!timelineNotifier) return null
             var clipCount = timelineNotifier.clipCountForTrack(trackIdx)
@@ -2377,6 +4053,21 @@ Item {
                    String(frames).padStart(2, '0')
         }
 
+        // Convert a Y position (in track area local coords) to track index
+        // accounting for per-track heights
+        function trackIndexFromY(y) {
+            if (!timelineNotifier) return 0
+            var tc = timelineNotifier.trackCount
+            var cumY = 0
+            for (var i = 0; i < tc; i++) {
+                var ti = timelineNotifier.trackInfo(i)
+                var h = (ti.isVisible !== false) ? (ti.trackHeight || defaultTrackHeight) : 12
+                if (y < cumY + h) return i
+                cumY += h
+            }
+            return Math.max(0, tc - 1)
+        }
+
         // Feature 13: Lasso selection — select all clips whose rectangles overlap the lasso.
         // Lasso coordinates are in root (VE2TimelinePanel) coordinate space.
         function performLassoSelect() {
@@ -2395,7 +4086,7 @@ Item {
 
             for (var t = 0; t < trackCount; t++) {
                 var tInfo = timelineNotifier.trackInfo(t)
-                var trackH = (tInfo.isVisible !== false) ? defaultTrackHeight : 12
+                var trackH = (tInfo.isVisible !== false) ? (tInfo.trackHeight || defaultTrackHeight) : 12
                 var trackTop = trackY
                 var trackBottom = trackY + trackH
                 trackY += trackH
@@ -2488,6 +4179,44 @@ Item {
         }
     }
 
+    // ---- Right-click context menu for gaps ----
+    Menu {
+        id: gapContextMenu
+        property int _trackIdx: -1
+        property double _gapStart: 0
+        property double _gapDuration: 0
+
+        MenuItem {
+            text: "Close Gap (" + gapContextMenu._gapDuration.toFixed(1) + "s)"
+            onTriggered: {
+                if (timelineNotifier)
+                    timelineNotifier.closeGapAt(gapContextMenu._trackIdx, gapContextMenu._gapStart)
+            }
+        }
+        MenuItem {
+            text: "Insert Slug / Placeholder"
+            onTriggered: {
+                if (timelineNotifier)
+                    timelineNotifier.insertSlugAt(gapContextMenu._trackIdx, gapContextMenu._gapStart, gapContextMenu._gapDuration)
+            }
+        }
+        MenuSeparator {}
+        MenuItem {
+            text: "Close All Gaps on This Track"
+            onTriggered: {
+                if (timelineNotifier)
+                    timelineNotifier.closeTrackGaps(gapContextMenu._trackIdx)
+            }
+        }
+        MenuItem {
+            text: "Delete All Gaps (All Tracks)"
+            onTriggered: {
+                if (timelineNotifier)
+                    timelineNotifier.deleteAllGaps()
+            }
+        }
+    }
+
     // ---- Right-click context menu for clips ----
     Menu {
         id: clipContextMenu
@@ -2519,6 +4248,24 @@ Item {
             text: "Duplicate"
             onTriggered: { if (timelineNotifier && clipContextMenu.targetClipId >= 0) timelineNotifier.duplicateClip(clipContextMenu.targetClipId) }
         }
+        MenuItem {
+            text: timelineNotifier && clipContextMenu.targetClipId >= 0
+                  && timelineNotifier.isClipDisabled(clipContextMenu.targetClipId)
+                  ? "Enable Clip (D)" : "Disable Clip (D)"
+            onTriggered: {
+                if (timelineNotifier && clipContextMenu.targetClipId >= 0)
+                    timelineNotifier.toggleClipDisabled(clipContextMenu.targetClipId)
+            }
+        }
+        MenuSeparator {}
+        MenuItem {
+            text: "Copy Effects"
+            onTriggered: { if (timelineNotifier) timelineNotifier.copyEffects(clipContextMenu.targetClipId) }
+        }
+        MenuItem {
+            text: "Paste Effects"
+            onTriggered: { if (timelineNotifier) timelineNotifier.pasteEffects(clipContextMenu.targetClipId) }
+        }
         MenuSeparator {}
         // Feature 10: Link/Unlink
         MenuItem {
@@ -2538,6 +4285,67 @@ Item {
                     // Link the two selected clips
                     var ids = timelineNotifier.selectedClipIds
                     if (ids.length === 2) timelineNotifier.linkClips(ids[0], ids[1])
+                }
+            }
+        }
+        // Detach / Reattach Audio
+        MenuSeparator {}
+        MenuItem {
+            text: "Detach Audio"
+            enabled: timelineNotifier && clipContextMenu.targetClipId >= 0
+                && timelineNotifier.canDetachAudio(clipContextMenu.targetClipId)
+            onTriggered: {
+                if (timelineNotifier && clipContextMenu.targetClipId >= 0)
+                    timelineNotifier.detachAudio(clipContextMenu.targetClipId)
+            }
+        }
+        MenuItem {
+            text: "Reattach Audio"
+            enabled: timelineNotifier && clipContextMenu.targetClipId >= 0
+                && timelineNotifier.canReattachAudio(clipContextMenu.targetClipId)
+            onTriggered: {
+                if (timelineNotifier && clipContextMenu.targetClipId >= 0)
+                    timelineNotifier.reattachAudio(clipContextMenu.targetClipId)
+            }
+        }
+
+        // Magnetic timeline: Connect/Disconnect from primary storyline
+        MenuSeparator {}
+        MenuItem {
+            text: {
+                if (!timelineNotifier || clipContextMenu.targetClipId < 0) return "Connect to Primary"
+                var cid = clipContextMenu.targetClipId
+                var sc = timelineNotifier.selectedClip
+                if (sc && sc.connectedToPrimaryClipId >= 0) return "Disconnect from Primary"
+                return "Connect to Primary"
+            }
+            enabled: timelineNotifier && timelineNotifier.magneticTimelineEnabled && clipContextMenu.targetClipId >= 0
+            onTriggered: {
+                if (!timelineNotifier) return
+                var cid = clipContextMenu.targetClipId
+                var sc = timelineNotifier.selectedClip
+                if (sc && sc.connectedToPrimaryClipId >= 0) {
+                    timelineNotifier.disconnectClip(cid)
+                } else {
+                    // Find the primary clip below at the same time position
+                    var tracks = timelineNotifier.tracks
+                    var clipData = null
+                    for (var ti = 0; ti < tracks.length; ti++) {
+                        if (tracks[ti].isMagneticPrimary) {
+                            var cnt = timelineNotifier.clipCountForTrack(ti)
+                            for (var ci = 0; ci < cnt; ci++) {
+                                var cd = timelineNotifier.clipData(ti, ci)
+                                if (sc && cd.timelineIn <= sc.timelineIn && (cd.timelineIn + cd.duration) > sc.timelineIn) {
+                                    clipData = cd
+                                    break
+                                }
+                            }
+                        }
+                    }
+                    if (clipData) {
+                        var offset = sc.timelineIn - clipData.timelineIn
+                        timelineNotifier.connectClipToPrimary(cid, clipData.clipId, offset)
+                    }
                 }
             }
         }
@@ -2579,8 +4387,16 @@ Item {
             onTriggered: { console.log("[Speed] Reverse clip:", clipContextMenu.targetClipId); if (timelineNotifier) timelineNotifier.reverseClip(clipContextMenu.targetClipId) }
         }
         MenuItem {
-            text: "Freeze Frame"
-            onTriggered: { console.log("[Speed] Freeze clip:", clipContextMenu.targetClipId); if (timelineNotifier) timelineNotifier.freezeFrame(clipContextMenu.targetClipId) }
+            text: "Freeze Frame (simple)"
+            onTriggered: { if (timelineNotifier) timelineNotifier.freezeFrame(clipContextMenu.targetClipId) }
+        }
+        MenuItem {
+            text: "Add Freeze Frame (2s)"
+            onTriggered: { if (timelineNotifier) timelineNotifier.addFreezeFrame(clipContextMenu.targetClipId, 2.0) }
+        }
+        MenuItem {
+            text: "Freeze and Extend (2s)"
+            onTriggered: { if (timelineNotifier) timelineNotifier.freezeAndExtend(clipContextMenu.targetClipId, 2.0) }
         }
         MenuSeparator {}
         // ---- Speed Ramp Presets ----
@@ -3094,6 +4910,57 @@ Item {
             timelineNotifier.addMarker()
             event.accepted = true
         }
+        // D to toggle disable on selected clip(s)
+        if (event.key === Qt.Key_D && !event.modifiers && timelineNotifier) {
+            if (timelineNotifier.selectedClipCount > 1) {
+                var ids = timelineNotifier.selectedClipIds
+                for (var i = 0; i < ids.length; i++)
+                    timelineNotifier.toggleClipDisabled(ids[i])
+            } else if (timelineNotifier.selectedClipId >= 0) {
+                timelineNotifier.toggleClipDisabled(timelineNotifier.selectedClipId)
+            }
+            event.accepted = true
+        }
+        // A to select track forward, Shift+A to select track backward
+        if (event.key === Qt.Key_A && timelineNotifier && timelineNotifier.selectedClipId >= 0) {
+            if (event.modifiers & Qt.ShiftModifier) {
+                timelineNotifier.selectTrackBackward(timelineNotifier.selectedClipId)
+            } else if (!event.modifiers) {
+                timelineNotifier.selectTrackForward(timelineNotifier.selectedClipId)
+            }
+            event.accepted = true
+        }
+        // C to activate razor mode
+        if (event.key === Qt.Key_C && !event.modifiers && timelineNotifier) {
+            timelineNotifier.setRazorMode(true)
+            event.accepted = true
+        }
+        // V to return to selection mode
+        if (event.key === Qt.Key_V && !event.modifiers && timelineNotifier) {
+            timelineNotifier.setRazorMode(false)
+            timelineNotifier.setTrimEditMode(0)
+            event.accepted = true
+        }
+        // JKL key state tracking for combo detection (J+K = slow reverse, K+L = slow forward)
+        if (event.key === Qt.Key_J) root._jKeyHeld = true
+        if (event.key === Qt.Key_K) root._kKeyHeld = true
+        if (event.key === Qt.Key_L) root._lKeyHeld = true
+
+        // Magnetic timeline: hold P for free position override
+        if (event.key === Qt.Key_P && !event.isAutoRepeat && timelineNotifier) {
+            timelineNotifier.setPositionOverride(true)
+            event.accepted = true
+        }
+    }
+    Keys.onReleased: function(event) {
+        // JKL key release tracking
+        if (event.key === Qt.Key_J) root._jKeyHeld = false
+        if (event.key === Qt.Key_K) root._kKeyHeld = false
+        if (event.key === Qt.Key_L) root._lKeyHeld = false
+
+        if (event.key === Qt.Key_P && !event.isAutoRepeat && timelineNotifier) {
+            timelineNotifier.setPositionOverride(false)
+        }
     }
     focus: true
 
@@ -3105,7 +4972,7 @@ Item {
         visible: timelineNotifier ? timelineNotifier.activePanel === 10 : false  // BottomPanelTab::markers = 10
         anchors.right: parent.right
         anchors.top: rulerRow.bottom
-        anchors.bottom: footer.top
+        anchors.bottom: isStacked ? stackedDivider.top : footer.top
         width: 260
         z: 150
         color: "#12122A"
@@ -3350,7 +5217,7 @@ Item {
         id: splitLine
         visible: root._splitLineVisible
         anchors.top: rulerRow.bottom
-        anchors.bottom: footer.top
+        anchors.bottom: isStacked ? stackedDivider.top : footer.top
         x: root._splitLineX
         width: 2; z: 110; radius: 1
         color: "#FF5252"

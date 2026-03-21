@@ -9,6 +9,9 @@ FfmpegResult FfmpegCliRunner::execute(const QString& command) {
 
     auto process = std::make_unique<QProcess>();
     activeProcess_ = process.get();
+    // Use SeparateChannels here since we need to read both stdout and stderr
+    // for progress parsing. The readyRead signals drain buffers incrementally.
+    process->setProcessChannelMode(QProcess::SeparateChannels);
 
     QString stderrBuf;
     QString stdoutBuf;

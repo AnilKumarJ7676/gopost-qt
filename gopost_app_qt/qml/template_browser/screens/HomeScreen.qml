@@ -140,7 +140,7 @@ Page {
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: router.push("/editor/video")
+                            onClicked: router.push("/editor/video2")
                         }
                     }
 

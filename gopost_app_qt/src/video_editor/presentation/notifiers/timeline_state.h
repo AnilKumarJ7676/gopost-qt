@@ -25,6 +25,9 @@ enum class BottomPanelTab {
 };
 Q_ENUM_NS(BottomPanelTab)
 
+enum class TrimEditMode : int { Normal = 0, Ripple, Roll, Slip, Slide };
+Q_ENUM_NS(TrimEditMode)
+
 // ---------------------------------------------------------------------------
 // PlaybackState (sub-struct exposed as grouped Q_PROPERTYs)
 // ---------------------------------------------------------------------------
@@ -60,9 +63,22 @@ struct TimelineState {
     // Insert mode: true=insert (push clips right), false=overwrite (replace underneath)
     bool insertMode = true;
 
+    // Trim/edit mode (Normal, Ripple, Roll, Slip, Slide)
+    TrimEditMode trimEditMode = TrimEditMode::Normal;
+
     // Waveform display
     bool showWaveforms = true;
     bool waveformStereo = false;  // false=mono, true=stereo L/R
+
+    // Duplicate frame detection overlay
+    bool showDuplicateFrames = false;
+
+    // Razor/Blade tool mode
+    bool razorModeEnabled = false;
+
+    // Magnetic timeline (FCP-style): auto-ripple on primary storyline
+    bool magneticTimelineEnabled = true;
+    bool positionOverrideActive = false;  // hold P key to allow free placement
 
     // Generation counters for fine-grained change tracking.
     // Delegates bump these before calling setState() so the notifier
