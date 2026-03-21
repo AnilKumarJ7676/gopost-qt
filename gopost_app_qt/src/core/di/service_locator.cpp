@@ -1,5 +1,5 @@
 #include "core/di/service_locator.h"
-#include "core/navigation/router.h"
+#include "core/ui_support/navigation/router.h"
 #include "core/config/app_environment.h"
 #include "core/security/secure_storage_service.h"
 #include "core/network/interceptors/auth_interceptor.h"
@@ -209,7 +209,7 @@ void ServiceLocator::setVideoTimelineEngine(rendering::VideoTimelineEngine* engi
     m_videoTimelineEngine = engine;
 }
 
-void ServiceLocator::setPlatformEngine(engines::PlatformCapabilityEngine* engine) {
+void ServiceLocator::setPlatformEngine(platform::PlatformCapabilityEngine* engine) {
     m_platformEngine = engine;
 }
 

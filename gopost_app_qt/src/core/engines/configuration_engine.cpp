@@ -1,5 +1,5 @@
 #include "configuration_engine.h"
-#include "platform_capability_engine.h"
+#include "core/platform/platform_capability_engine.h"
 #include "logging_engine.h"
 
 #include <QCoreApplication>
@@ -7,7 +7,7 @@
 
 namespace gopost::core::engines {
 
-ConfigurationEngine::ConfigurationEngine(PlatformCapabilityEngine* platform,
+ConfigurationEngine::ConfigurationEngine(platform::PlatformCapabilityEngine* platform,
                                          LoggingEngine* logging,
                                          QObject* parent)
     : QObject(parent)

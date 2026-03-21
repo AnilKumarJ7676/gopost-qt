@@ -9,9 +9,10 @@
 #include <QFile>
 #include <functional>
 
+namespace gopost::platform { class PlatformCapabilityEngine; }
+
 namespace gopost::core::engines {
 
-class PlatformCapabilityEngine;
 class MemoryManagementEngine;
 
 struct LogEntry {
@@ -25,7 +26,7 @@ struct LogEntry {
 class LoggingEngine : public QObject, public CoreEngine {
     Q_OBJECT
 public:
-    explicit LoggingEngine(PlatformCapabilityEngine* platform,
+    explicit LoggingEngine(platform::PlatformCapabilityEngine* platform,
                            MemoryManagementEngine* memory,
                            QObject* parent = nullptr);
     ~LoggingEngine() override;
@@ -85,7 +86,7 @@ private:
     static void qtMessageHandler(QtMsgType type, const QMessageLogContext& ctx,
                                  const QString& msg);
 
-    PlatformCapabilityEngine* m_platform = nullptr;
+    platform::PlatformCapabilityEngine* m_platform = nullptr;
     MemoryManagementEngine* m_memory = nullptr;
     bool m_initialized = false;
 

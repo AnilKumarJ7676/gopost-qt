@@ -11,15 +11,16 @@
 #include <QVariantMap>
 #include <functional>
 
+namespace gopost::platform { class PlatformCapabilityEngine; }
+
 namespace gopost::core::engines {
 
-class PlatformCapabilityEngine;
 class LoggingEngine;
 
 class ConfigurationEngine : public QObject, public CoreEngine {
     Q_OBJECT
 public:
-    explicit ConfigurationEngine(PlatformCapabilityEngine* platform,
+    explicit ConfigurationEngine(platform::PlatformCapabilityEngine* platform,
                                  LoggingEngine* logging,
                                  QObject* parent = nullptr);
     ~ConfigurationEngine() override;
@@ -66,7 +67,7 @@ private:
     void loadEnvironmentOverrides();
     void notifyObservers(const QString& key, const QVariant& value);
 
-    PlatformCapabilityEngine* m_platform = nullptr;
+    platform::PlatformCapabilityEngine* m_platform = nullptr;
     LoggingEngine* m_logging = nullptr;
     bool m_initialized = false;
 

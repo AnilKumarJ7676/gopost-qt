@@ -1,9 +1,12 @@
 #include "video_editor/data/services/thumbnail_service.h"
 
+#include <QCoreApplication>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
 #include <QStandardPaths>
+#include <QThread>
 #include <QDebug>
 #include <cmath>
 
@@ -31,19 +34,19 @@ void ThumbnailService::ensureGpuProbed() {
 void ThumbnailService::probeGpu() {
     hwAccelStatus_ = HwAccelStatus::Probing;
 
-    QProcess proc;
-    proc.setProcessChannelMode(QProcess::ForwardedErrorChannel);
-    proc.start(QStringLiteral("ffmpeg"), {QStringLiteral("-hwaccels"), QStringLiteral("-hide_banner")});
-
+    // Use system() to avoid QProcess QRingBuffer overflow entirely.
+    QString tmpPath = QDir::tempPath() + QStringLiteral("/gopost_hwaccel_%1.txt")
+        .arg(QCoreApplication::applicationPid());
+    QString cmd = QStringLiteral("ffmpeg -hwaccels -hide_banner > \"%1\" 2>NUL").arg(tmpPath);
+    system(cmd.toLocal8Bit().constData());
     QByteArray rawOutput;
-    while (proc.state() != QProcess::NotRunning || proc.bytesAvailable() > 0) {
-        if (proc.bytesAvailable() > 0) {
-            rawOutput.append(proc.read(proc.bytesAvailable()));
-        } else if (!proc.waitForReadyRead(5000)) {
-            break;
-        }
+    QFile tmpFile(tmpPath);
+    if (tmpFile.exists() && tmpFile.open(QIODevice::ReadOnly)) {
+        rawOutput = tmpFile.readAll();
+        tmpFile.close();
     }
-    if (proc.exitCode() != 0) {
+    QFile::remove(tmpPath);
+    if (rawOutput.isEmpty()) {
         hwAccelStatus_ = HwAccelStatus::Unavailable;
         return;
     }

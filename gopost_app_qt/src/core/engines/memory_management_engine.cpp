@@ -1,12 +1,13 @@
 #include "memory_management_engine.h"
-#include "platform_capability_engine.h"
+#include "core/platform/platform_capability_engine.h"
+#include "core/interfaces/IDeviceCapability.h"
 
 #include <QMutexLocker>
 #include <QVariantMap>
 
 namespace gopost::core::engines {
 
-MemoryManagementEngine::MemoryManagementEngine(PlatformCapabilityEngine* platform,
+MemoryManagementEngine::MemoryManagementEngine(platform::PlatformCapabilityEngine* platform,
                                                  QObject* parent)
     : QObject(parent)
     , m_platform(platform) {}
@@ -23,16 +24,16 @@ void MemoryManagementEngine::initialize() {
                    / (1024.0 * 1024.0 * 1024.0);
 
     switch (m_platform->deviceTier()) {
-    case PlatformCapabilityEngine::DeviceTier::Ultra:
+    case core::interfaces::DeviceTier::Ultra:
         m_globalBudget = static_cast<qint64>(ramGb * 0.25 * 1024 * 1024 * 1024); // 25% of RAM
         break;
-    case PlatformCapabilityEngine::DeviceTier::High:
+    case core::interfaces::DeviceTier::High:
         m_globalBudget = static_cast<qint64>(ramGb * 0.20 * 1024 * 1024 * 1024);
         break;
-    case PlatformCapabilityEngine::DeviceTier::Medium:
+    case core::interfaces::DeviceTier::Mid:
         m_globalBudget = static_cast<qint64>(ramGb * 0.15 * 1024 * 1024 * 1024);
         break;
-    case PlatformCapabilityEngine::DeviceTier::Low:
+    case core::interfaces::DeviceTier::Low:
         m_globalBudget = static_cast<qint64>(ramGb * 0.10 * 1024 * 1024 * 1024);
         break;
     }

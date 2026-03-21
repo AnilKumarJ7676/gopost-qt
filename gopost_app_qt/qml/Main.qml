@@ -4,10 +4,11 @@ import QtQuick.Controls.Material
 
 ApplicationWindow {
     id: appWindow
-    width: 1400
-    height: 900
+    width: 1280
+    height: 720
     visible: true
     title: "Gopost"
+    color: "#1a1a1a"
 
     onClosing: function(close) {
         // Stop timeline playback before closing to prevent
@@ -104,7 +105,7 @@ ApplicationWindow {
 
     Component {
         id: mainShellComponent
-        Item { Loader { anchors.fill: parent; source: "qrc:/qt/qml/GopostApp/qml/core/navigation/MainShell.qml" } }
+        Item { Loader { anchors.fill: parent; source: "qrc:/qt/qml/GopostApp/qml/core/ui_support/navigation/MainShell.qml" } }
     }
 
     Component {
@@ -125,5 +126,55 @@ ApplicationWindow {
     Component {
         id: imageExportComponent
         Item { Loader { anchors.fill: parent; source: "qrc:/qt/qml/GopostApp/qml/image_editor/screens/ExportScreen.qml" } }
+    }
+
+    // Boot info block — centered, visible on auth/initial screen
+    Column {
+        anchors.centerIn: parent
+        spacing: 12
+        z: 100
+        visible: currentScreenCategory === "auth"
+
+        Text {
+            text: "GoPost"
+            color: "white"
+            font.pixelSize: 32
+            font.bold: true
+            anchors.horizontalCenter: parent.horizontalCenter
+        }
+        Text {
+            text: "Level 0 Bootstrap OK"
+            color: "#888888"
+            font.pixelSize: 18
+            anchors.horizontalCenter: parent.horizontalCenter
+        }
+        Text {
+            text: bootInfo
+                  ? "Tier: " + bootInfo.tier
+                    + " | " + bootInfo.cpuInfo
+                    + " | " + bootInfo.ramGb + "GB"
+                    + " | " + bootInfo.storageType
+                  : ""
+            color: "#666666"
+            font.pixelSize: 14
+            anchors.horizontalCenter: parent.horizontalCenter
+        }
+        Text {
+            text: bootInfo ? "Boot: " + bootInfo.bootTimeMs.toFixed(0) + "ms" : ""
+            color: "#E85D3A"
+            font.pixelSize: 16
+            font.bold: true
+            anchors.horizontalCenter: parent.horizontalCenter
+        }
+    }
+
+    // FPS diagnostic overlay — floats on top of all content
+    Loader {
+        source: "qrc:/qt/qml/GopostApp/qml/core/ui_support/diagnostics/FpsOverlay.qml"
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.topMargin: 8
+        anchors.rightMargin: 8
+        z: 9999
     }
 }

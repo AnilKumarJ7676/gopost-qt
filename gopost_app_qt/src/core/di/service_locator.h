@@ -20,8 +20,11 @@ class ImageEditorEngine;
 class VideoTimelineEngine;
 } // namespace gopost::rendering
 
-namespace gopost::core::engines {
+namespace gopost::platform {
 class PlatformCapabilityEngine;
+} // namespace gopost::platform
+
+namespace gopost::core::engines {
 class MemoryManagementEngine;
 class LoggingEngine;
 class ConfigurationEngine;
@@ -85,13 +88,13 @@ public:
     rendering::VideoTimelineEngine* videoTimelineEngine() const { return m_videoTimelineEngine; }
 
     // Core engines (not owned)
-    void setPlatformEngine(engines::PlatformCapabilityEngine* engine);
+    void setPlatformEngine(platform::PlatformCapabilityEngine* engine);
     void setMemoryEngine(engines::MemoryManagementEngine* engine);
     void setLoggingEngine(engines::LoggingEngine* engine);
     void setConfigEngine(engines::ConfigurationEngine* engine);
     void setDiagnosticsEngine(engines::DiagnosticsEngine* engine);
     void setEventBusEngine(engines::EventBusEngine* engine);
-    engines::PlatformCapabilityEngine* platformEngine() const { return m_platformEngine; }
+    platform::PlatformCapabilityEngine* platformEngine() const { return m_platformEngine; }
     engines::MemoryManagementEngine* memoryEngine() const { return m_memoryEngine; }
     engines::LoggingEngine* loggingEngine() const { return m_loggingEngine; }
     engines::ConfigurationEngine* configEngine() const { return m_configEngine; }
@@ -130,7 +133,7 @@ private:
     rendering::VideoTimelineEngine* m_videoTimelineEngine = nullptr;
 
     // Core engines (not owned)
-    engines::PlatformCapabilityEngine* m_platformEngine = nullptr;
+    platform::PlatformCapabilityEngine* m_platformEngine = nullptr;
     engines::MemoryManagementEngine* m_memoryEngine = nullptr;
     engines::LoggingEngine* m_loggingEngine = nullptr;
     engines::ConfigurationEngine* m_configEngine = nullptr;

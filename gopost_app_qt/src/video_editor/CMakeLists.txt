@@ -52,8 +52,8 @@ set(VIDEO_EDITOR_HEADERS
     domain/models/playback_state.h
     domain/models/export_config.h
     domain/models/editor_command.h
-    domain/models/editor_layout_state.h
-    domain/models/timeline_drag_data.h
+    presentation/editor_layout_state.h
+    presentation/timeline_drag_data.h
     domain/models/video_clip_info.h
 
     # Domain repositories

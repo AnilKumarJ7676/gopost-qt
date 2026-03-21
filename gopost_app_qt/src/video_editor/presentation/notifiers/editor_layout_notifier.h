@@ -4,7 +4,7 @@
 #include <QSettings>
 #include <QStringList>
 
-#include "video_editor/domain/models/editor_layout_state.h"
+#include "video_editor/presentation/editor_layout_state.h"
 
 namespace gopost::video_editor {
 

@@ -1,9 +1,13 @@
 #include "video_editor/presentation/delegates/keyframe_audio_delegate.h"
 
+#include <QCoreApplication>
 #include <QDebug>
+#include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QThread>
 #include <algorithm>
 #include <cmath>
 
@@ -178,27 +182,29 @@ void KeyframeAudioDelegate::syncAudioToEngine(int clipId) {
 static std::optional<MediaProbeResult> runFfprobe(const QString& path, int timeoutMs) {
     if (path.isEmpty() || !QFileInfo::exists(path)) return std::nullopt;
 
-    QProcess proc;
-    proc.setProcessChannelMode(QProcess::ForwardedErrorChannel);
-    proc.start(QStringLiteral("ffprobe"), {
-        QStringLiteral("-v"), QStringLiteral("quiet"),
-        QStringLiteral("-print_format"), QStringLiteral("flat"),
-        QStringLiteral("-show_format"),
-        QStringLiteral("-show_streams"),
-        path
-    });
+    // Use system() instead of QProcess to completely bypass Qt's internal
+    // QRingBuffer which can overflow: ASSERT "bytes <= bufferSize"
+    Q_UNUSED(timeoutMs);
+    QString tmpPath = QDir::tempPath() + QStringLiteral("/gopost_audioprobe_%1_%2.txt")
+        .arg(QCoreApplication::applicationPid())
+        .arg(reinterpret_cast<quintptr>(QThread::currentThread()), 0, 16);
 
-    // Read incrementally to avoid QRingBuffer overflow
+    QString cmd = QStringLiteral(
+        "ffprobe -v quiet -print_format flat -show_format -show_streams"
+        " \"%1\" > \"%2\" 2>NUL")
+        .arg(path, tmpPath);
+
+    system(cmd.toLocal8Bit().constData());
+
     QByteArray rawOutput;
-    while (proc.state() != QProcess::NotRunning || proc.bytesAvailable() > 0) {
-        if (proc.bytesAvailable() > 0) {
-            rawOutput.append(proc.read(proc.bytesAvailable()));
-        } else if (!proc.waitForReadyRead(timeoutMs)) {
-            break;
-        }
+    QFile tmpFile(tmpPath);
+    if (tmpFile.exists() && tmpFile.open(QIODevice::ReadOnly)) {
+        rawOutput = tmpFile.readAll();
+        tmpFile.close();
     }
+    QFile::remove(tmpPath);
 
-    if (proc.exitCode() != 0) {
+    if (rawOutput.isEmpty()) {
         qWarning() << "[MediaProbe] ffprobe failed for:" << path;
         return std::nullopt;
     }

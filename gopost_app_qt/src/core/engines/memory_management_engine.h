@@ -7,14 +7,14 @@
 #include <QTimer>
 #include <QMutex>
 
-namespace gopost::core::engines {
+namespace gopost::platform { class PlatformCapabilityEngine; }
 
-class PlatformCapabilityEngine;
+namespace gopost::core::engines {
 
 class MemoryManagementEngine : public QObject, public CoreEngine {
     Q_OBJECT
 public:
-    explicit MemoryManagementEngine(PlatformCapabilityEngine* platform,
+    explicit MemoryManagementEngine(platform::PlatformCapabilityEngine* platform,
                                      QObject* parent = nullptr);
     ~MemoryManagementEngine() override;
 
@@ -66,7 +66,7 @@ private:
         qint64 usage = 0;
     };
 
-    PlatformCapabilityEngine* m_platform = nullptr;
+    platform::PlatformCapabilityEngine* m_platform = nullptr;
     bool m_initialized = false;
     qint64 m_globalBudget = 0;
     PressureLevel m_currentPressure = PressureLevel::Normal;

@@ -3,10 +3,12 @@
 #include <QCoreApplication>
 #include <QDebug>
 #include <QDir>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QStandardPaths>
+#include <QThread>
 
 #include <algorithm>
 #include <cmath>
@@ -111,30 +113,30 @@ void QProcessVideoDecoder::close() {
 // ============================================================================
 
 bool QProcessVideoDecoder::probe(const QString& path) {
-    QString ffprobe = findExecutable(QStringLiteral("ffprobe"));
+    // Use system() instead of QProcess to completely bypass Qt's internal
+    // QRingBuffer which can overflow: ASSERT "bytes <= bufferSize"
+    QString tmpPath = QDir::tempPath() + QStringLiteral("/gopost_probe_%1_%2.json")
+        .arg(QCoreApplication::applicationPid())
+        .arg(reinterpret_cast<quintptr>(QThread::currentThread()), 0, 16);
 
-    QProcess proc;
-    proc.setProcessChannelMode(QProcess::ForwardedErrorChannel);
-    proc.start(ffprobe, {
-        QStringLiteral("-v"), QStringLiteral("quiet"),
-        QStringLiteral("-print_format"), QStringLiteral("json"),
-        QStringLiteral("-show_format"),
-        QStringLiteral("-show_streams"),
-        QStringLiteral("-select_streams"), QStringLiteral("v:0"),
-        path
-    });
+    QString cmd = QStringLiteral(
+        "ffprobe -v quiet -print_format json"
+        " -show_entries stream=width,height,r_frame_rate,avg_frame_rate,duration,codec_type:format=duration"
+        " -select_streams v:0"
+        " \"%1\" > \"%2\" 2>NUL")
+        .arg(path, tmpPath);
 
-    // Read incrementally to avoid QRingBuffer overflow
+    int ret = system(cmd.toLocal8Bit().constData());
+
     QByteArray output;
-    while (proc.state() != QProcess::NotRunning || proc.bytesAvailable() > 0) {
-        if (proc.bytesAvailable() > 0) {
-            output.append(proc.read(proc.bytesAvailable()));
-        } else if (!proc.waitForReadyRead(10000)) {
-            break;
-        }
+    QFile tmpFile(tmpPath);
+    if (ret == 0 && tmpFile.exists() && tmpFile.open(QIODevice::ReadOnly)) {
+        output = tmpFile.readAll();
+        tmpFile.close();
     }
+    QFile::remove(tmpPath);
 
-    if (proc.exitCode() != 0) return false;
+    if (output.isEmpty()) return false;
     QJsonParseError parseError;
     QJsonDocument doc = QJsonDocument::fromJson(output, &parseError);
     if (parseError.error != QJsonParseError::NoError) return false;
@@ -201,13 +203,14 @@ bool QProcessVideoDecoder::startDecodeProcess(double startTime) {
          << QStringLiteral("-pix_fmt") << QStringLiteral("rgba")
          << QStringLiteral("-s")
          << QString("%1x%2").arg(decodeWidth_).arg(decodeHeight_)
+         << QStringLiteral("-threads") << QStringLiteral("1")
          << QStringLiteral("-v") << QStringLiteral("quiet")
          << QStringLiteral("-nostdin")
          << QStringLiteral("pipe:1");
 
     ffmpeg_ = std::make_unique<QProcess>();
     // ForwardedErrorChannel sends stderr directly to parent's stderr,
-    // completely bypassing Qt's internal QRingBuffer that can overflow.
+    // completely bypassing Qt's internal QRingBuffer for stderr.
     ffmpeg_->setProcessChannelMode(QProcess::ForwardedErrorChannel);
 
     qDebug() << "[QProcessDecoder] starting ffmpeg:" << ffmpeg << args.join(' ');

@@ -1,5 +1,5 @@
 #include "logging_engine.h"
-#include "platform_capability_engine.h"
+#include "core/platform/platform_capability_engine.h"
 #include "memory_management_engine.h"
 
 #include <QDateTime>
@@ -12,7 +12,7 @@ namespace gopost::core::engines {
 
 LoggingEngine* LoggingEngine::s_instance = nullptr;
 
-LoggingEngine::LoggingEngine(PlatformCapabilityEngine* platform,
+LoggingEngine::LoggingEngine(platform::PlatformCapabilityEngine* platform,
                              MemoryManagementEngine* memory,
                              QObject* parent)
     : QObject(parent)

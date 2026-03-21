@@ -17,6 +17,8 @@ find_package(Qt6 6.5 REQUIRED COMPONENTS
     Multimedia
     Concurrent
     ShaderTools
+    Sql
+    Test
 )
 
 qt_standard_project_setup(REQUIRES 6.5)
@@ -33,9 +35,10 @@ qt_add_executable(gopost_app_qt
     src/main.cpp
     src/app.h
     src/app.cpp
+    resources/gopost.rc
 )
 
-set_source_files_properties(qml/core/theme/Theme.qml
+set_source_files_properties(qml/core/ui_support/theme/Theme.qml
     PROPERTIES QT_QML_SINGLETON_TYPE TRUE
 )
 
@@ -46,10 +49,11 @@ qt_add_qml_module(gopost_app_qt
     VERSION 1.0
     QML_FILES
         qml/Main.qml
-        qml/core/theme/Theme.qml
-        qml/core/theme/NeonGlow.qml
-        qml/core/navigation/MainShell.qml
-        qml/core/navigation/GuestBanner.qml
+        qml/core/ui_support/theme/Theme.qml
+        qml/core/ui_support/theme/NeonGlow.qml
+        qml/core/ui_support/navigation/MainShell.qml
+        qml/core/ui_support/navigation/GuestBanner.qml
+        qml/core/ui_support/diagnostics/FpsOverlay.qml
         qml/auth/screens/LoginScreen.qml
         qml/auth/screens/RegisterScreen.qml
         qml/auth/widgets/LoginRequiredSheet.qml
@@ -124,3 +128,101 @@ install(TARGETS gopost_app_qt
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+enable_testing()
+set(GOPOST_TEST_ENV "PATH=${Qt6_DIR}/../../../bin\;$ENV{PATH}" "QT_PLUGIN_PATH=${Qt6_DIR}/../../../plugins")
+
+# Common test link libraries (core pulls in service_locator which needs all feature libs)
+set(GOPOST_TEST_LIBS
+    Qt6::Core Qt6::Gui Qt6::Quick Qt6::Concurrent Qt6::Network Qt6::Qml Qt6::Test
+    gopost_core_lib gopost_auth_lib gopost_rendering_bridge_lib
+    gopost_image_editor_lib gopost_video_editor_lib
+    gopost_template_browser_lib gopost_go_craft_lib
+    gopost_bridge gopost_permissions gopost_storage gopost_mmap gopost_io gopost_import
+)
+
+# Test: Platform Capability Engine
+add_executable(test_platform_capability tests/platform/TestPlatformCapability.cpp)
+target_link_libraries(test_platform_capability PRIVATE ${GOPOST_TEST_LIBS})
+target_include_directories(test_platform_capability PRIVATE src)
+add_test(NAME TestPlatformCapability COMMAND test_platform_capability)
+set_tests_properties(TestPlatformCapability PROPERTIES ENVIRONMENT "${GOPOST_TEST_ENV}")
+
+# Test: Memory Budget Engine
+add_executable(test_memory_budget tests/memory/TestMemoryBudget.cpp)
+target_link_libraries(test_memory_budget PRIVATE ${GOPOST_TEST_LIBS})
+target_include_directories(test_memory_budget PRIVATE src)
+add_test(NAME TestMemoryBudget COMMAND test_memory_budget)
+set_tests_properties(TestMemoryBudget PROPERTIES ENVIRONMENT "${GOPOST_TEST_ENV}")
+
+# Test: Diagnostics Engine
+add_executable(test_diagnostics tests/diagnostics/TestDiagnostics.cpp)
+target_link_libraries(test_diagnostics PRIVATE ${GOPOST_TEST_LIBS})
+target_include_directories(test_diagnostics PRIVATE src)
+add_test(NAME TestDiagnostics COMMAND test_diagnostics)
+set_tests_properties(TestDiagnostics PROPERTIES ENVIRONMENT "${GOPOST_TEST_ENV}")
+
+# Test: Logger Engine
+add_executable(test_logger tests/logging/TestLogger.cpp)
+target_link_libraries(test_logger PRIVATE ${GOPOST_TEST_LIBS})
+target_include_directories(test_logger PRIVATE src)
+add_test(NAME TestLogger COMMAND test_logger)
+set_tests_properties(TestLogger PROPERTIES ENVIRONMENT "${GOPOST_TEST_ENV}")
+
+# Test: Config Store Engine
+add_executable(test_config_store tests/config/TestConfigStore.cpp)
+target_link_libraries(test_config_store PRIVATE ${GOPOST_TEST_LIBS})
+target_include_directories(test_config_store PRIVATE src)
+add_test(NAME TestConfigStore COMMAND test_config_store)
+set_tests_properties(TestConfigStore PROPERTIES ENVIRONMENT "${GOPOST_TEST_ENV}")
+
+# Test: Event Bus Engine
+add_executable(test_event_bus tests/eventbus/TestEventBus.cpp)
+target_link_libraries(test_event_bus PRIVATE ${GOPOST_TEST_LIBS})
+target_include_directories(test_event_bus PRIVATE src)
+add_test(NAME TestEventBus COMMAND test_event_bus)
+set_tests_properties(TestEventBus PROPERTIES ENVIRONMENT "${GOPOST_TEST_ENV}")
+
+# ── Level 1 Tests ──────────────────────────────────────────────────────
+
+# Test: Platform Bridge
+add_executable(test_bridge tests/bridges/TestBridge.cpp)
+target_link_libraries(test_bridge PRIVATE ${GOPOST_TEST_LIBS})
+target_include_directories(test_bridge PRIVATE src)
+add_test(NAME TestBridge COMMAND test_bridge)
+set_tests_properties(TestBridge PROPERTIES ENVIRONMENT "${GOPOST_TEST_ENV}")
+
+# Test: Permission Engine
+add_executable(test_permissions tests/permissions/TestPermissions.cpp)
+target_link_libraries(test_permissions PRIVATE ${GOPOST_TEST_LIBS})
+target_include_directories(test_permissions PRIVATE src)
+add_test(NAME TestPermissions COMMAND test_permissions)
+set_tests_properties(TestPermissions PROPERTIES ENVIRONMENT "${GOPOST_TEST_ENV}")
+
+# Test: Storage Scheduler Engine
+add_executable(test_storage tests/storage/TestStorage.cpp)
+target_link_libraries(test_storage PRIVATE ${GOPOST_TEST_LIBS})
+target_include_directories(test_storage PRIVATE src)
+add_test(NAME TestStorage COMMAND test_storage)
+set_tests_properties(TestStorage PROPERTIES ENVIRONMENT "${GOPOST_TEST_ENV}")
+
+# Test: Mmap Engine
+add_executable(test_mmap tests/mmap/TestMmap.cpp)
+target_link_libraries(test_mmap PRIVATE ${GOPOST_TEST_LIBS})
+target_include_directories(test_mmap PRIVATE src)
+add_test(NAME TestMmap COMMAND test_mmap)
+set_tests_properties(TestMmap PROPERTIES ENVIRONMENT "${GOPOST_TEST_ENV}")
+
+# Test: IO Engine
+add_executable(test_io tests/io/TestIO.cpp)
+target_link_libraries(test_io PRIVATE ${GOPOST_TEST_LIBS})
+target_include_directories(test_io PRIVATE src)
+add_test(NAME TestIO COMMAND test_io)
+set_tests_properties(TestIO PROPERTIES ENVIRONMENT "${GOPOST_TEST_ENV}")
+
+# Test: Media Import Engine
+add_executable(test_import tests/import/TestImport.cpp)
+target_link_libraries(test_import PRIVATE ${GOPOST_TEST_LIBS})
+target_include_directories(test_import PRIVATE src)
+add_test(NAME TestImport COMMAND test_import)
+set_tests_properties(TestImport PROPERTIES ENVIRONMENT "${GOPOST_TEST_ENV}")

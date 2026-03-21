@@ -9,22 +9,9 @@ FfmpegResult FfmpegCliRunner::execute(const QString& command) {
 
     auto process = std::make_unique<QProcess>();
     activeProcess_ = process.get();
-    // Use SeparateChannels here since we need to read both stdout and stderr
-    // for progress parsing. The readyRead signals drain buffers incrementally.
-    process->setProcessChannelMode(QProcess::SeparateChannels);
-
-    QString stderrBuf;
-    QString stdoutBuf;
-
-    QObject::connect(process.get(), &QProcess::readyReadStandardOutput, [&]() {
-        stdoutBuf.append(QString::fromUtf8(process->readAllStandardOutput()));
-    });
-
-    QObject::connect(process.get(), &QProcess::readyReadStandardError, [&]() {
-        const auto data = QString::fromUtf8(process->readAllStandardError());
-        stderrBuf.append(data);
-        parseProgress(data);
-    });
+    // ForwardedChannels sends both stdout and stderr directly to the parent,
+    // completely bypassing Qt's internal QRingBuffer. No pipe buffering at all.
+    process->setProcessChannelMode(QProcess::ForwardedChannels);
 
     process->start(QStringLiteral("ffmpeg"), args);
 
@@ -39,19 +26,21 @@ FfmpegResult FfmpegCliRunner::execute(const QString& command) {
         };
     }
 
-    // Generous timeout (6 hours) for long encoding operations.
+    // With ForwardedChannels, no pipe data to read — just wait for completion.
+    // Progress reporting is not available in this mode (no stderr capture).
+    // For long encodes, the caller should use -progress pipe:2 or a temp file.
     const bool finished = process->waitForFinished(6 * 3600 * 1000);
     activeProcess_ = nullptr;
 
     if (!finished) {
         process->kill();
-        return {.success = false, .output = stderrBuf + stdoutBuf, .returnCode = -1};
+        return {.success = false, .output = QStringLiteral("FFmpeg timed out"), .returnCode = -1};
     }
 
     const int exitCode = process->exitCode();
     return {
         .success = exitCode == 0,
-        .output = stderrBuf + stdoutBuf,
+        .output = {},
         .returnCode = exitCode,
     };
 }

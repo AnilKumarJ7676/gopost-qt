@@ -1,19 +1,28 @@
 #include "app.h"
 
 #include "core/logging/app_logger.h"
-#include "core/theme/app_theme.h"
-#include "core/engines/platform_capability_engine.h"
+#include "core/ui_support/theme/app_theme.h"
+#include "core/platform/platform_capability_engine.h"
 #include "core/engines/memory_management_engine.h"
 #include "core/engines/logging_engine.h"
 #include "core/engines/configuration_engine.h"
 #include "core/engines/diagnostics_engine.h"
 #include "core/engines/event_bus_engine.h"
+#include "core/memory/memory_engine.h"
+#include "core/diagnostics/diagnostic_engine.h"
+#include "core/diagnostics/boot_info_provider.h"
+#include "core/logging/logging_engine_new.h"
+#include "core/config/configuration_engine_new.h"
+#include "core/events/event_bus_engine_new.h"
+#include "core/events/CoreEvents.h"
+#include "core/interfaces/IDeviceCapability.h"
 
 #include <QQuickStyle>
 #include <QQmlContext>
 #include <QUrl>
 #include <QDebug>
 #include <QDir>
+#include <chrono>
 
 namespace gopost {
 
@@ -60,107 +69,210 @@ int GopostApp::run() {
                      },
                      Qt::QueuedConnection);
 
-    // List available QRC resources for debugging
-    qDebug() << "QRC contents at :/qt/qml/GopostApp/qml/:";
     QDir qrcDir(":/qt/qml/GopostApp/qml");
-    for (const auto& entry : qrcDir.entryList()) {
+    qDebug() << "QRC contents at :/qt/qml/GopostApp/qml/:";
+    for (const auto& entry : qrcDir.entryList())
         qDebug() << "  " << entry;
-    }
 
     m_engine->load(url);
 
     return m_app->exec();
 }
 
+static const char* tierStr(core::interfaces::DeviceTier t) {
+    switch (t) {
+    case core::interfaces::DeviceTier::Ultra: return "ULTRA";
+    case core::interfaces::DeviceTier::High:  return "HIGH";
+    case core::interfaces::DeviceTier::Mid:   return "MID";
+    case core::interfaces::DeviceTier::Low:   return "LOW";
+    }
+    return "?";
+}
+
+static const char* storageStr(core::interfaces::StorageType s) {
+    switch (s) {
+    case core::interfaces::StorageType::NVMe:    return "NVMe";
+    case core::interfaces::StorageType::SSD:     return "SSD";
+    case core::interfaces::StorageType::HDD:     return "HDD";
+    case core::interfaces::StorageType::Unknown: return "Unknown";
+    }
+    return "?";
+}
+
 void GopostApp::initializeCoreEngines() {
     using namespace core::engines;
+    auto t0 = std::chrono::steady_clock::now();
 
-    // 1. Platform Capability Engine (no deps)
-    m_platformEngine = std::make_unique<PlatformCapabilityEngine>(this);
+    // ── 1. Logging Engine (FIRST — so all subsequent engines can log) ──
+    m_loggingEngineNew = std::make_unique<logging::LoggingEngineNew>();
+    logging::Logger::setInstance(m_loggingEngineNew.get());
+    m_loggingEngineNew->info(QStringLiteral("Logging"),
+                              QStringLiteral("Logging engine initialized"));
+
+    // ── 2. Platform Capability Engine ──
+    m_platformEngine = std::make_unique<platform::PlatformCapabilityEngine>(this);
     m_platformEngine->initialize();
     m_serviceLocator->setPlatformEngine(m_platformEngine.get());
-    core::AppLogger::info(QStringLiteral("Platform engine initialized — %1 %2, tier=%3, type=%4, cores=%5, RAM=%6 MB, DPI=%7, touch=%8")
-        .arg(m_platformEngine->platformName())
-        .arg(m_platformEngine->osVersionString())
-        .arg(static_cast<int>(m_platformEngine->deviceTier()))
-        .arg(static_cast<int>(m_platformEngine->deviceType()))
-        .arg(m_platformEngine->cpuCoreCount())
-        .arg(m_platformEngine->totalRamBytes() / (1024 * 1024))
-        .arg(m_platformEngine->screenDpi(), 0, 'f', 0)
-        .arg(m_platformEngine->hasTouchScreen() ? QStringLiteral("yes") : QStringLiteral("no")));
 
-    // 2. Memory Management Engine (needs Platform)
+    auto cpu = m_platformEngine->cpuInfo();
+    auto gpu = m_platformEngine->gpuInfo();
+    auto tier = m_platformEngine->deviceTier();
+    auto storage = m_platformEngine->storageType();
+    auto hw = m_platformEngine->hwDecodeSupport();
+
+    m_loggingEngineNew->info(QStringLiteral("Platform"),
+        QStringLiteral("Tier: %1 | CPU: %2C/%3T | RAM: %4 GB | GPU: %5 (%6 GB) | Storage: %7")
+            .arg(QString::fromLatin1(tierStr(tier)))
+            .arg(cpu.physicalCores).arg(cpu.logicalThreads)
+            .arg(m_platformEngine->totalRamBytes() / (1024LL * 1024 * 1024))
+            .arg(gpu.name)
+            .arg(gpu.vramBytes / (1024LL * 1024 * 1024))
+            .arg(QString::fromLatin1(storageStr(storage))));
+
+    m_loggingEngineNew->info(QStringLiteral("Platform"),
+        QStringLiteral("HW Decode: H.264=%1 H.265=%2 VP9=%3 AV1=%4 | OS: %5")
+            .arg(hw.h264 ? "YES" : "NO")
+            .arg(hw.h265 ? "YES" : "NO")
+            .arg(hw.vp9  ? "YES" : "NO")
+            .arg(hw.av1  ? "YES" : "NO")
+            .arg(m_platformEngine->osVersionString()));
+
+    // ── 3. Memory Engine ──
+    m_memoryEngineNew = std::make_unique<memory::MemoryEngine>(*m_platformEngine);
+    auto budgets = m_memoryEngineNew->computeBudgets();
+
+    m_loggingEngineNew->info(QStringLiteral("Memory"),
+        QStringLiteral("Budget ceiling: %1 MB | frameCache=%2 MB | thumbnailCache=%3 MB | "
+                        "audioCache=%4 MB | effectCache=%5 MB | importBuffer=%6 MB | reserve=%7 MB")
+            .arg(budgets.globalBudgetBytes / (1024 * 1024))
+            .arg(budgets.frameCacheBytes / (1024 * 1024))
+            .arg(budgets.thumbnailCacheBytes / (1024 * 1024))
+            .arg(budgets.audioCacheBytes / (1024 * 1024))
+            .arg(budgets.effectCacheBytes / (1024 * 1024))
+            .arg(budgets.importBufferBytes / (1024 * 1024))
+            .arg(budgets.reserveBytes / (1024 * 1024)));
+
+    // ── 4. Configuration Engine ──
+    m_configEngineNew = std::make_unique<config::ConfigurationEngineNew>(
+        m_loggingEngineNew.get());
+    m_loggingEngineNew->info(QStringLiteral("Config"),
+        QStringLiteral("Schema version: %1 | Theme: %2 | Target FPS: %3")
+            .arg(m_configEngineNew->schemaVersion())
+            .arg(m_configEngineNew->getString(QStringLiteral("app.theme")))
+            .arg(m_configEngineNew->getInt(QStringLiteral("editor.playback.targetFps"))));
+
+    // ── 5. Diagnostic Engine ──
+    m_diagnosticEngineNew = std::make_unique<diagnostics::DiagnosticEngine>(
+        *m_platformEngine, m_memoryEngineNew.get(), this);
+    m_diagnosticEngineNew->setOverlayVisible(true);
+    m_loggingEngineNew->info(QStringLiteral("Diagnostics"),
+                              QStringLiteral("Diagnostics engine ready, overlay enabled"));
+
+    // ── 6. Event Bus Engine ──
+    m_eventBusNew = std::make_unique<events::EventBusEngineNew>(
+        m_loggingEngineNew.get());
+    m_loggingEngineNew->info(QStringLiteral("EventBus"),
+                              QStringLiteral("Event bus engine ready"));
+
+    // Publish EngineReadyEvent for each engine
+    for (const auto& name : {"Logging", "Platform", "Memory", "Config", "Diagnostics", "EventBus"}) {
+        QVariantMap data;
+        data[QStringLiteral("name")] = QString::fromLatin1(name);
+        m_eventBusNew->publish(QStringLiteral("EngineReady"), data);
+    }
+
+    // ── Wire cross-engine subscriptions ──
+    m_eventBusNew->subscribe(QStringLiteral("MemoryWarning"),
+        [this](const QString&, const QVariantMap& data) {
+            m_loggingEngineNew->warn(QStringLiteral("Memory"),
+                QStringLiteral("Memory warning: pool=%1 usage=%2%")
+                    .arg(data[QStringLiteral("pool")].toString())
+                    .arg(data[QStringLiteral("usage")].toDouble(), 0, 'f', 1));
+        });
+
+    m_eventBusNew->subscribe(QStringLiteral("ConfigChanged"),
+        [this](const QString&, const QVariantMap& data) {
+            m_loggingEngineNew->info(QStringLiteral("Config"),
+                QStringLiteral("Config changed: %1 = %2")
+                    .arg(data[QStringLiteral("key")].toString())
+                    .arg(data[QStringLiteral("value")].toString()));
+        });
+
+    // ── Boot timing ──
+    auto t1 = std::chrono::steady_clock::now();
+    double bootMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+    m_loggingEngineNew->info(QStringLiteral("Boot"),
+        QStringLiteral("GoPost Level 0 Bootstrap Complete — %1ms").arg(bootMs, 0, 'f', 1));
+
+    // Publish BootCompleteEvent
+    QVariantMap bootData;
+    bootData[QStringLiteral("bootTimeMs")] = bootMs;
+    m_eventBusNew->publish(QStringLiteral("BootComplete"), bootData);
+
+    // ── BootInfoProvider for QML ──
+    m_bootInfo = std::make_unique<diagnostics::BootInfoProvider>(this);
+    m_bootInfo->setTier(QString::fromLatin1(tierStr(tier)));
+    m_bootInfo->setCpuInfo(QStringLiteral("%1C/%2T").arg(cpu.physicalCores).arg(cpu.logicalThreads));
+    m_bootInfo->setRamGb(static_cast<int>(m_platformEngine->totalRamBytes() / (1024LL * 1024 * 1024)));
+    m_bootInfo->setStorageType(QString::fromLatin1(storageStr(storage)));
+    m_bootInfo->setGpuName(gpu.name);
+    m_bootInfo->setBootTimeMs(bootMs);
+
+    // ── Old engines (backward compat with ServiceLocator) ──
     m_memoryEngine = std::make_unique<MemoryManagementEngine>(m_platformEngine.get(), this);
     m_memoryEngine->initialize();
     m_serviceLocator->setMemoryEngine(m_memoryEngine.get());
-    core::AppLogger::info(QStringLiteral("Memory engine initialized — budget=%1 MB")
-        .arg(m_memoryEngine->globalBudgetBytes() / (1024 * 1024)));
 
-    // 3. Logging Engine (needs Platform, Memory)
     m_loggingEngine = std::make_unique<LoggingEngine>(m_platformEngine.get(),
                                                        m_memoryEngine.get(), this);
     m_loggingEngine->initialize();
     m_serviceLocator->setLoggingEngine(m_loggingEngine.get());
 
-    // 4. Configuration Engine (needs Platform, Logging)
     m_configEngine = std::make_unique<ConfigurationEngine>(m_platformEngine.get(),
                                                             m_loggingEngine.get(), this);
     m_configEngine->initialize();
     m_serviceLocator->setConfigEngine(m_configEngine.get());
 
-    // 5. Diagnostics Engine (needs Memory, Logging)
     m_diagnosticsEngine = std::make_unique<DiagnosticsEngine>(m_memoryEngine.get(),
                                                                m_loggingEngine.get(), this);
     m_diagnosticsEngine->initialize();
     m_serviceLocator->setDiagnosticsEngine(m_diagnosticsEngine.get());
 
-    // 6. Event Bus Engine (needs Logging, Diagnostics)
     m_eventBusEngine = std::make_unique<EventBusEngine>(m_loggingEngine.get(),
                                                          m_diagnosticsEngine.get(), this);
     m_eventBusEngine->initialize();
     m_serviceLocator->setEventBusEngine(m_eventBusEngine.get());
 
-    // Post initialization event
     m_eventBusEngine->post(QStringLiteral("engine.allCoreInitialized"), {});
 }
 
 void GopostApp::initializeEngines() {
-    // Try loading native image editor engine
-    // If it fails, use stub engine
     try {
-        // Direct C++ linkage — no FFI needed
-        // auto* nativeEngine = new rendering::GopostImageEditorEngineNative();
-        // nativeEngine->initialize();
-        // nativeEngine->initEffects();
-        // m_serviceLocator->setImageEditorEngine(nativeEngine);
         core::AppLogger::info(QStringLiteral("Image engine initialized"));
     } catch (const std::exception& e) {
         core::AppLogger::warning(
             QStringLiteral("Image engine init failed, using stub: %1").arg(e.what()));
-        // m_serviceLocator->setImageEditorEngine(new rendering::StubImageEditorEngine());
     }
 
-    // Try loading native video timeline engine
     try {
-        // auto* videoEngine = new rendering::GopostVideoTimelineEngineNative(enginePtr);
-        // m_serviceLocator->setVideoTimelineEngine(videoEngine);
         core::AppLogger::info(QStringLiteral("Video engine initialized"));
     } catch (const std::exception& e) {
         core::AppLogger::warning(
             QStringLiteral("Video engine init failed, using stub: %1").arg(e.what()));
-        // m_serviceLocator->setVideoTimelineEngine(new rendering::StubVideoTimelineEngine());
     }
 }
 
 void GopostApp::setupQml() {
-    // Set Material style
     QQuickStyle::setStyle(QStringLiteral("Material"));
 
-    // Apply theme based on system preference
-    // QPalette will be set dynamically based on light/dark mode
-
-    // Register all service locator objects with QML context
     m_serviceLocator->registerWithQml(m_engine.get());
+
+    if (m_diagnosticEngineNew)
+        m_diagnosticEngineNew->registerWithQml(m_engine.get());
+
+    if (m_bootInfo)
+        m_bootInfo->registerWithQml(m_engine.get());
 }
 
 } // namespace gopost

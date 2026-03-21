@@ -25,30 +25,23 @@ FocusScope {
     property bool isDragOver: false
     property real thumbWidth: 120  // thumbnail width (resizable 80–240)
 
-    // Keyboard shortcuts for media pool (Shortcut works regardless of focus)
-    Shortcut {
-        sequence: "Ctrl+A"
-        enabled: root.visible && mediaPoolNotifier !== null
-        onActivated: mediaPoolNotifier.selectAllInBin()
-    }
-    Shortcut {
-        sequence: "Delete"
-        enabled: root.visible && mediaPoolNotifier !== null && mediaPoolNotifier.selectedAssetCount > 0
-        onActivated: {
+    // Keyboard: Ctrl+A is handled in VideoEditor2Screen.qml (routes to media pool
+    // or timeline based on active panel). Delete/F2/Enter are local to this panel
+    // and use Keys.onPressed below to avoid Shortcut ambiguity.
+
+    // Handle keyboard shortcuts via Keys (scoped to when this FocusScope has activeFocus)
+    Keys.onPressed: event => {
+        if (!mediaPoolNotifier) return
+
+        if (event.key === Qt.Key_Delete && mediaPoolNotifier.selectedAssetCount > 0) {
             var ids = mediaPoolNotifier.selectedAssetIds
             for (var i = 0; i < ids.length; i++)
                 mediaPoolNotifier.removeAsset(ids[i])
-        }
-    }
-    Shortcut {
-        sequence: "F2"
-        enabled: root.visible && mediaPoolNotifier !== null && mediaPoolNotifier.selectedAssetCount === 1
-        onActivated: renameDialog.open()
-    }
-    Shortcut {
-        sequence: "Return"
-        enabled: root.visible && mediaPoolNotifier !== null && mediaPoolNotifier.selectedAssetCount > 0
-        onActivated: {
+            event.accepted = true
+        } else if (event.key === Qt.Key_F2 && mediaPoolNotifier.selectedAssetCount === 1) {
+            renameDialog.open()
+            event.accepted = true
+        } else if (event.key === Qt.Key_Return && mediaPoolNotifier.selectedAssetCount > 0) {
             var selIds = mediaPoolNotifier.selectedAssetIds
             var assets = mediaPoolNotifier.filteredAssets
             for (var j = 0; j < assets.length; j++) {
@@ -57,6 +50,7 @@ FocusScope {
                     break
                 }
             }
+            event.accepted = true
         }
     }
 
@@ -414,23 +408,49 @@ FocusScope {
                 Label { text: "Drop files or click Import"; font.pixelSize: 11; color: "#505070"; Layout.alignment: Qt.AlignHCenter }
             }
 
-            // ---- Marquee drag-select overlay (sits above grid/list, behind item controls) ----
+            // ---- Marquee drag-select overlay (above grid/list, passes through to items) ----
             MouseArea {
                 id: marqueeArea
                 anchors.fill: parent; anchors.margins: 6
                 visible: !root.isDragOver
-                z: 0  // below grid item z but catches clicks on empty space
+                z: 2  // above grid/list so we always get the press first
                 acceptedButtons: Qt.LeftButton
-                propagateComposedEvents: true
 
                 property bool isMarquee: false
                 property point marqueeStart: Qt.point(0, 0)
                 property point marqueeCurrent: Qt.point(0, 0)
                 property var startSelectedIds: []  // IDs selected before marquee started
 
+                // Check if the press is on a populated grid/list cell
+                function isOnItem(mx, my) {
+                    if (!mediaPoolNotifier) return false
+                    var count = mediaPoolNotifier.filteredAssets.length
+                    if (count === 0) return false
+
+                    if (root.isGridView) {
+                        var cols = Math.max(1, Math.floor(gridView.width / gridView.cellWidth))
+                        var col = Math.floor(mx / gridView.cellWidth)
+                        var row = Math.floor((my + gridView.contentY) / gridView.cellHeight)
+                        if (col < 0 || col >= cols) return false
+                        var idx = row * cols + col
+                        return idx >= 0 && idx < count
+                    } else {
+                        var itemH = 38 + 2  // height + spacing
+                        var idx2 = Math.floor((my + listView.contentY) / itemH)
+                        return idx2 >= 0 && idx2 < count
+                    }
+                }
+
                 onPressed: mouse => {
-                    // Only start marquee if clicking empty space (not on an item)
-                    // Items have z > 0 so they get the press first; if we get it, it's empty space
+                    root.forceActiveFocus()
+
+                    // If press is on a grid/list item, pass through to the item delegate
+                    if (isOnItem(mouse.x, mouse.y)) {
+                        mouse.accepted = false
+                        return
+                    }
+
+                    // Empty space — start marquee tracking
                     isMarquee = false
                     marqueeStart = Qt.point(mouse.x, mouse.y)
                     marqueeCurrent = Qt.point(mouse.x, mouse.y)
@@ -678,6 +698,7 @@ FocusScope {
                             property bool deferredSelect: false  // true = do single-select on release
 
                             onPressed: mouse => {
+                                root.forceActiveFocus()
                                 pressPos = Qt.point(mouse.x, mouse.y)
                                 isDragging = false
                                 deferredSelect = false
@@ -829,6 +850,7 @@ FocusScope {
                         property bool deferredSelect: false
 
                         onPressed: mouse => {
+                            root.forceActiveFocus()
                             pressPos = Qt.point(mouse.x, mouse.y)
                             isDragging = false
                             deferredSelect = false

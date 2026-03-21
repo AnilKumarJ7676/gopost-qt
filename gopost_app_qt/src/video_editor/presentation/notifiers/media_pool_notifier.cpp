@@ -1,11 +1,14 @@
 #include "video_editor/presentation/notifiers/media_pool_notifier.h"
 
+#include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
+#include <QThread>
 #include <QUrl>
 #include <QUuid>
 #include <QVariantMap>
@@ -189,27 +192,28 @@ void MediaPoolNotifier::probeMediaMetadata(MediaAsset& asset) {
     // Try ffprobe first for accurate duration/resolution
     bool probed = false;
 
-    QProcess ffprobe;
-    ffprobe.setProcessChannelMode(QProcess::ForwardedErrorChannel);
-    ffprobe.start(QStringLiteral("ffprobe"), {
-        QStringLiteral("-v"), QStringLiteral("quiet"),
-        QStringLiteral("-print_format"), QStringLiteral("json"),
-        QStringLiteral("-show_format"),
-        QStringLiteral("-show_streams"),
-        asset.filePath
-    });
+    // Use system() instead of QProcess to completely bypass Qt's internal
+    // QRingBuffer which can overflow: ASSERT "bytes <= bufferSize"
+    QString tmpPath = QDir::tempPath() + QStringLiteral("/gopost_mediaprobe_%1_%2.json")
+        .arg(QCoreApplication::applicationPid())
+        .arg(reinterpret_cast<quintptr>(QThread::currentThread()), 0, 16);
 
-    // Read incrementally to avoid QRingBuffer overflow
+    QString cmd = QStringLiteral(
+        "ffprobe -v quiet -print_format json -show_format -show_streams"
+        " \"%1\" > \"%2\" 2>NUL")
+        .arg(asset.filePath, tmpPath);
+
+    system(cmd.toLocal8Bit().constData());
+
     QByteArray output;
-    while (ffprobe.state() != QProcess::NotRunning || ffprobe.bytesAvailable() > 0) {
-        if (ffprobe.bytesAvailable() > 0) {
-            output.append(ffprobe.read(ffprobe.bytesAvailable()));
-        } else if (!ffprobe.waitForReadyRead(ImportGuardrails::kProbeTimeoutMs)) {
-            break;
-        }
+    QFile tmpFile(tmpPath);
+    if (tmpFile.exists() && tmpFile.open(QIODevice::ReadOnly)) {
+        output = tmpFile.readAll();
+        tmpFile.close();
     }
+    QFile::remove(tmpPath);
 
-    if (ffprobe.exitCode() == 0) {
+    if (!output.isEmpty()) {
         QJsonParseError parseError;
         auto doc = QJsonDocument::fromJson(output, &parseError);
         if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
